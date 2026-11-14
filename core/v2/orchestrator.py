@@ -1533,6 +1533,213 @@ class OdysseusOrchestrator:
                 error=str(e),
             )
 
+    async def _execute_plan_dag(
+        self, plan: Plan,
+        model: Optional[str] = None,
+        approval_id: Optional[str] = None,
+        useragent_knowledge: Optional[list[dict]] = None,
+    ) -> OrchestratorResponse:
+        """Executa o plano respeitando dependências (ordem topológica).
+
+        Diferenças vs _execute_plan():
+        - Respeita `step.dependencies`.
+        - Falha propaga transitivamente (dependentes ficam "blocked").
+        - Detecta deadlock residual (não deve acontecer pós-validação).
+        """
+        plan.status = "running"
+        agent_results: list[AgentResult] = []
+        pending_approval: list[dict] = []
+
+        if not self._tool_context:
+            self._tool_context = build_tool_context(
+                self.workspace_purpose, allow_interpreters=self.allow_interpreters
+            )
+
+        status = {s.step: "pending" for s in plan.steps}
+
+        try:
+            while True:
+                ready = [
+                    s for s in plan.steps
+                    if status[s.step] == "pending"
+                    and all(
+                        status.get(d) in ("completed", "skipped")
+                        for d in (s.dependencies or [])
+                    )
+                ]
+
+                pending_ids = [sid for sid, st in status.items() if st == "pending"]
+                if not ready and pending_ids:
+                    logger.error(
+                        "Deadlock no plano %s (DAG): %s", plan.id, pending_ids
+                    )
+                    for sid in pending_ids:
+                        status[sid] = "failed"
+                        for step in plan.steps:
+                            if step.step == sid:
+                                step.status = "failed"
+                                break
+                    plan.status = "failed"
+                    break
+
+                if not ready:
+                    break
+
+                ready_agents = [s for s in ready if not s.tool]
+                ready_tools = [s for s in ready if s.tool]
+
+                if ready_agents:
+                    for s in ready_agents:
+                        status[s.step] = "running"
+                        s.status = "running"
+
+                    coros = [
+                        self._execute_agent_step(
+                            s, plan, useragent_knowledge=useragent_knowledge
+                        )
+                        for s in ready_agents
+                    ]
+                    outs = await asyncio.gather(*coros, return_exceptions=True)
+
+                    for s, out in zip(ready_agents, outs):
+                        if isinstance(out, AgentResult):
+                            agent_results.append(out)
+                            status[s.step] = "completed" if out.success else "failed"
+                            s.status = status[s.step]
+                        else:
+                            status[s.step] = "failed"
+                            s.status = "failed"
+                            agent_results.append(AgentResult(
+                                task_id=f"TASK-{uuid.uuid4().hex[:8].upper()}",
+                                success=False,
+                                summary=f"Exceção no agente {s.agent or s.step}",
+                                error=str(out),
+                            ))
+
+                for s in ready_tools:
+                    status[s.step] = "running"
+                    s.status = "running"
+
+                    tr = await self._execute_tool_step(s, plan, approval_id=approval_id)
+                    agent_results.append(tr)
+
+                    if tr.details and tr.details.get("requires_approval"):
+                        status[s.step] = "pending"
+                        s.status = "pending"
+                        pending_approval.append({
+                            "step": s.step,
+                            "tool": s.tool,
+                            "approval_id": tr.details.get("approval_id"),
+                            "message": tr.summary,
+                        })
+                        break
+
+                    status[s.step] = "completed" if tr.success else "failed"
+                    s.status = status[s.step]
+                    s.result = tr.summary
+
+                if pending_approval:
+                    break
+
+                changed = True
+                while changed:
+                    changed = False
+                    for s in plan.steps:
+                        if status[s.step] != "pending":
+                            continue
+                        for d in (s.dependencies or []):
+                            if status.get(d) in ("failed", "blocked"):
+                                status[s.step] = "blocked"
+                                s.status = "blocked"
+                                changed = True
+                                break
+
+        except Exception as e:
+            logger.exception("Erro no motor DAG do plano %s", plan.id)
+            plan.status = "failed"
+            return OrchestratorResponse(
+                message=f"Erro no motor DAG: {e}",
+                plan=plan,
+                agent_results=agent_results,
+                metadata={"engine": "dag", "error": str(e)},
+            )
+
+        if pending_approval:
+            plan.status = "awaiting_approval"
+            first = pending_approval[0]
+            self._pending_plans[first["approval_id"]] = plan
+            return OrchestratorResponse(
+                message=(
+                    f"Passo '{first['step']}' precisa de aprovacao para "
+                    f"executar '{first['tool']}'.\n\n"
+                    f"**ID:** {first['approval_id']}\n\n"
+                    f"Aprovar: POST /api/v2/approve/{first['approval_id']}\n"
+                    f"Negar:   POST /api/v2/deny/{first['approval_id']}"
+                ),
+                plan=plan,
+                agent_results=agent_results,
+                requires_approval=pending_approval,
+                metadata={"awaiting_approval": True, "engine": "dag"},
+            )
+
+        any_failed = any(st == "failed" for st in status.values())
+        any_blocked = any(st == "blocked" for st in status.values())
+
+        if any_failed or any_blocked:
+            plan.status = "failed" if any_failed else "completed_with_blocked"
+            failed_ids = [sid for sid, st in status.items() if st == "failed"]
+            blocked_ids = [sid for sid, st in status.items() if st == "blocked"]
+            parts = [f"Plano {plan.id} nao completou."]
+            if failed_ids:
+                parts.append(f"Falhados: {failed_ids}")
+            if blocked_ids:
+                parts.append(f"Bloqueados: {blocked_ids}")
+            return OrchestratorResponse(
+                message="\n".join(parts),
+                plan=plan,
+                agent_results=agent_results,
+                metadata={
+                    "engine": "dag",
+                    "failed_steps": failed_ids,
+                    "blocked_steps": blocked_ids,
+                },
+            )
+
+        plan.status = "completed"
+
+        response_text = None
+        if agent_results:
+            response_text = await self._generate_llm_response(
+                f"Com base nestes resultados sobre \"{plan.query}\": "
+                f"{json.dumps([r.summary for r in agent_results])}, "
+                f"gera uma resposta util para o utilizador.",
+                model=model,
+                useragent_knowledge=useragent_knowledge,
+            )
+
+        llm_used = bool(response_text)
+        if not response_text:
+            response_text = self._build_agent_response(agent_results)
+
+        for r in agent_results:
+            tr = (r.details or {}).get("tool_result") if r.details else None
+            if tr is not None:
+                response_text += (
+                    "\n\n**Resultado real da ferramenta:**\n"
+                    f"```text\n{tr.get('data') or tr.get('error') or ''}\n```"
+                )
+
+        return OrchestratorResponse(
+            message=response_text,
+            plan=plan,
+            agent_results=agent_results,
+            metadata={
+                "llm_used": llm_used,
+                "engine": "dag",
+                "steps_status": dict(status),
+            },
+        )
+
     # ------------------------------------------------------------------
     #  Execução do plano (com paralelismo)
     # ------------------------------------------------------------------
@@ -1554,6 +1761,14 @@ class OdysseusOrchestrator:
         Um passo de ferramenta que exija aprovação interrompe o plano e devolve
         o pedido de aprovação ao utilizador — sem executar nada.
         """
+        if os.getenv("ODYSSEUS_V2_DAG_EXECUTION", "0") == "1":
+            return await self._execute_plan_dag(
+                plan,
+                model=model,
+                approval_id=approval_id,
+                useragent_knowledge=useragent_knowledge,
+            )
+
         plan.status = "running"
         agent_results: list[AgentResult] = []
         pending_approval: list[dict] = []
