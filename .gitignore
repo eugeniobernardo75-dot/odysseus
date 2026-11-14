@@ -1,4 +1,4 @@
-# Python
+﻿# Python
 __pycache__/
 *.pyc
 *.pyo
@@ -14,17 +14,17 @@ venv/
 .env
 .env.bak.*
 !.env.example
-# Local uv lockfile (optional, per-platform — see "Faster installs with uv" in README)
+# Local uv lockfile (optional, per-platform ??see "Faster installs with uv" in README)
 requirements.lock
 
-# SOPS workflow — encrypted `secrets.env` is intentionally committable,
+# SOPS workflow ??encrypted `secrets.env` is intentionally committable,
 # but every variant (plaintext, manual decrypt copy, editor backup)
 # must stay out of git. Mirrored in .dockerignore so the same artifacts
 # also cannot enter image build layers.
 secrets.env.*
 !secrets.env.example
 
-# Data — all user data stays local
+# Data ??all user data stays local
 data/
 # Per-worktree runtime state written by `odysseus dev` (its own data dir,
 # logs and stop handle) — disposable, and never shared between checkouts.
@@ -75,16 +75,16 @@ output.txt.txt
 *.tiff
 *.pdf
 
-# …except shipped static assets
+# ?쫊xcept shipped static assets
 !static/icons/*.png
 
-# …except shipped demo assets in docs/ that the README links to.
+# ?쫊xcept shipped demo assets in docs/ that the README links to.
 !docs/*.jpg
 !docs/*.jpeg
 !docs/*.png
 !docs/*.gif
 !docs/*.webp
-# …and curated docs/ subfolder assets (e.g. accessibility before/after shots).
+# ?쫆nd curated docs/ subfolder assets (e.g. accessibility before/after shots).
 !docs/**/*.png
 !docs/**/*.jpg
 !docs/**/*.gif
@@ -115,7 +115,7 @@ scripts/compound/*.json
 research_data/
 **/search_analytics.json
 
-# Internal dev/review notes — not for public repo
+# Internal dev/review notes ??not for public repo
 dev-docs/
 # Windows-port working docs (local only, not for public repo)
 docs/windows-port/
@@ -125,3 +125,20 @@ compound.config.json
 *.error.log
 _scratch/
 /odysseus/
+
+# Workspace de runtime
+Workspace/
+
+# Artefactos de trabalho
+.backups/
+.pytest-tmp-*/
+_audit/
+baseline.diff
+RELATORIO_*.txt
+*.bak
+
+# Dados pessoais / runtime (n찾o versionar)
+Obsidian Brain Vault/
+Odysseus_Mind_OS/
+Quarantine/
+data/v2_pending_approvals.json

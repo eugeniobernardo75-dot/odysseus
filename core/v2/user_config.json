@@ -1,0 +1,60 @@
+{
+  "name": "Utilizador",
+  "language": "pt-PT",
+  "style": "conversacional",
+  "tools": {
+    "terminal": true,
+    "file_editor": true,
+    "web_search": false,
+    "code_execution": true
+  },
+  "preferences": {
+    "verbosity": "normal",
+    "format_code": true,
+    "show_timestamps": false,
+    "confirm_destructive": true
+  },
+  "persona": {
+    "greeting": "Olá! 👋 O que precisas hoje?",
+    "farewell": "Até à próxima! 😊",
+    "role": "assistente pessoal"
+  },
+  "model": {
+    "default": "qwen3:8b",
+    "temperature": 0.7,
+    "max_tokens": 2048
+  },
+  "custom_agents": [
+    {
+      "name": "visas",
+      "description": "Especialista em processos de visto e imigração — orçamentos, documentação e prazos.",
+      "keywords": [
+        "visto",
+        "vistos",
+        "imigração",
+        "passaporte",
+        "embaixada",
+        "consulado",
+        "documentos"
+      ],
+      "system_prompt": "Tu és o agente 'Visas' do Odysseus V2, especialista em processos de visto e imigração. Ajuda o utilizador com orçamentos de serviços de visto, listas de documentação, prazos de processamento e passos a seguir. Responde sempre em português de Portugal, de forma clara e organizada, com listas e passos práticos.",
+      "model": "qwen3:8b"
+    },
+    {
+      "name": "negocios",
+      "description": "Assistente de negócios e finanças pessoais — planeamento, orçamentos e decisões.",
+      "keywords": [
+        "negócio",
+        "negocios",
+        "orçamento",
+        "orçamentos",
+        "faturas",
+        "impostos",
+        "investimento",
+        "poupança"
+      ],
+      "system_prompt": "Tu és o agente 'Negócios' do Odysseus V2, assistente de negócios e finanças pessoais. Ajuda com orçamentos, faturas, planeamento financeiro e decisões de negócio. Responde sempre em português de Portugal, com números claros e passos práticos.",
+      "model": "qwen3:8b"
+    }
+  ]
+}

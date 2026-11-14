@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Odysseus V2 — Agentes Personalizados</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+<style>
+:root {
+    --bg: #0a0a1a; --surface: #12122a; --surface-2: #1a1a34;
+    --border: #2d2d50; --text: #e2e2ec; --text-muted: #7c7c96; --text-dim: #55556e;
+    --primary: #6c5ce7; --primary-light: #a29bfe; --accent: #00cec9; --accent-light: #81ecec;
+    --green: #00b894; --green-light: #55efc4; --yellow: #fdcb6e; --red: #e17055; --red-light: #fab1a0;
+    --blue: #74b9ff; --font: 'Inter', -apple-system, 'Segoe UI', sans-serif;
+    --radius: 12px; --radius-sm: 8px; --radius-full: 9999px;
+    --shadow: 0 4px 24px rgba(0,0,0,.2); --transition: .25s cubic-bezier(.4,0,.2,1);
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:var(--font); background:var(--bg); color:var(--text); line-height:1.6; min-height:100vh; }
+.app-header { display:flex; align-items:center; justify-content:space-between; padding:18px 28px;
+    border-bottom:1px solid var(--border); background:var(--surface); position:sticky; top:0; z-index:100; }
+.header-left { display:flex; align-items:center; gap:14px; }
+.logo-icon { width:40px; height:40px; border-radius:var(--radius-sm);
+    background:linear-gradient(135deg,#6c5ce7,#00cec9); display:flex; align-items:center;
+    justify-content:center; font-size:20px; color:#fff; }
+.header-title h1 { font-size:20px; font-weight:700; }
+.header-title span { color:var(--text-muted); font-weight:400; }
+.header-title p { font-size:12px; color:var(--text-dim); }
+.header-right { display:flex; align-items:center; gap:12px; }
+.btn { display:inline-flex; align-items:center; gap:8px; padding:9px 16px; border-radius:var(--radius-sm);
+    border:1px solid var(--border); background:var(--surface-2); color:var(--text); cursor:pointer;
+    font-family:var(--font); font-size:13px; font-weight:600; transition:var(--transition); }
+.btn:hover { border-color:var(--primary); color:var(--primary-light); transform:translateY(-1px); }
+.btn.primary { background:linear-gradient(135deg,#6c5ce7,#5a4bd1); border:none; color:#fff; }
+.btn.primary:hover { filter:brightness(1.1); color:#fff; }
+.btn.success { background:rgba(0,184,148,.15); border-color:var(--green); color:var(--green-light); }
+.btn.danger { background:rgba(225,112,85,.12); border-color:var(--red); color:var(--red-light); }
+.btn.small { padding:5px 10px; font-size:12px; }
+.btn:disabled { opacity:.45; cursor:not-allowed; transform:none; }
+.wrap { max-width:1400px; margin:0 auto; padding:24px; display:grid; grid-template-columns:380px 1fr; gap:24px; }
+@media (max-width: 960px) { .wrap { grid-template-columns:1fr; } }
+.panel { background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; }
+.panel-head { display:flex; align-items:center; justify-content:space-between; padding:16px 20px;
+    border-bottom:1px solid var(--border); }
+.panel-head h2 { font-size:15px; font-weight:700; display:flex; align-items:center; gap:10px; }
+.panel-head .count { background:rgba(108,92,231,.15); color:var(--primary-light); font-size:12px;
+    padding:2px 10px; border-radius:var(--radius-full); font-weight:600; }
+.panel-body { padding:16px 20px; }
+.search-box { position:relative; margin-bottom:14px; }
+.search-box i { position:absolute; left:12px; top:50%; transform:translateY(-50%); color:var(--text-dim); font-size:13px; }
+.search-box input { width:100%; padding:10px 12px 10px 34px; border-radius:var(--radius-sm);
+    border:1px solid var(--border); background:var(--surface-2); color:var(--text);
+    font-family:var(--font); font-size:13px; outline:none; transition:var(--transition); }
+.search-box input:focus { border-color:var(--primary); }
+.agent-list { display:flex; flex-direction:column; gap:8px; max-height:calc(100vh - 260px); overflow-y:auto; }
+.agent-card { display:flex; align-items:center; gap:12px; padding:12px 14px; border-radius:var(--radius-sm);
+    background:var(--surface-2); border:1px solid var(--border); cursor:pointer; transition:var(--transition); }
+.agent-card:hover { border-color:var(--primary); }
+.agent-card.active { border-color:var(--primary); background:rgba(108,92,231,.08); }
+.agent-avatar { width:42px; height:42px; border-radius:var(--radius-sm); background:var(--surface);
+    border:1px solid var(--border); display:flex; align-items:center; justify-content:center; font-size:22px; flex-shrink:0; }
+.agent-meta { flex:1; min-width:0; }
+.agent-meta .name { font-weight:600; font-size:14px; display:flex; align-items:center; gap:8px; }
+.agent-meta .desc { font-size:12px; color:var(--text-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.agent-meta .tags { display:flex; gap:6px; margin-top:4px; flex-wrap:wrap; }
+.tag { font-size:10px; padding:2px 8px; border-radius:var(--radius-full); font-weight:600; }
+.tag.cat { background:rgba(0,206,201,.12); color:var(--accent-light); }
+.tag.model { background:rgba(116,185,255,.12); color:var(--blue); }
+.tag.off { background:rgba(124,124,150,.15); color:var(--text-muted); }
+.tag.prio { background:rgba(253,203,110,.12); color:var(--yellow); }
+.toggle { width:38px; height:20px; border-radius:var(--radius-full); background:var(--border); position:relative;
+    cursor:pointer; transition:var(--transition); flex-shrink:0; border:none; }
+.toggle.on { background:var(--green); }
+.toggle::after { content:''; position:absolute; width:14px; height:14px; border-radius:50%;
+    background:#fff; top:3px; left:3px; transition:var(--transition); }
+.toggle.on::after { left:21px; }
+.editor .panel-body { display:flex; flex-direction:column; gap:16px; }
+.grid2 { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+@media (max-width: 640px) { .grid2 { grid-template-columns:1fr; } }
+.field label { display:block; font-size:11px; font-weight:700; text-transform:uppercase;
+    letter-spacing:.5px; color:var(--text-muted); margin-bottom:6px; }
+.field input[type=text], .field input[type=number], .field select, .field textarea {
+    width:100%; padding:10px 12px; border-radius:var(--radius-sm); border:1px solid var(--border);
+    background:var(--surface-2); color:var(--text); font-family:var(--font); font-size:13px;
+    outline:none; transition:var(--transition); }
+.field input:focus, .field select:focus, .field textarea:focus { border-color:var(--primary); }
+.field textarea { resize:vertical; min-height:120px; }
+.check-row { display:flex; align-items:center; gap:8px; padding:6px 10px; border-radius:var(--radius-sm);
+    background:var(--surface-2); border:1px solid var(--border); font-size:12px; cursor:pointer; }
+.check-row input { accent-color:var(--primary); }
+.tools-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:8px; }
+.kw-row { display:flex; gap:8px; margin-bottom:8px; }
+.kw-chips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
+.chip { display:inline-flex; align-items:center; gap:6px; background:rgba(108,92,231,.15);
+    color:var(--primary-light); padding:4px 10px; border-radius:var(--radius-full); font-size:12px; font-weight:600; }
+.chip button { background:none; border:none; color:var(--red-light); cursor:pointer; font-size:12px; padding:0; }
+.prompt-editor { position:relative; }
+.prompt-editor textarea { width:100%; min-height:260px; font-family:'JetBrains Mono',Consolas,monospace;
+    font-size:13px; line-height:1.55; padding:14px; border-radius:var(--radius-sm);
+    border:1px solid var(--border); background:#0d0d1f; color:#d4f1f9; outline:none; resize:vertical;
+    tab-size:4; white-space:pre; overflow:auto; }
+.prompt-editor textarea:focus { border-color:var(--primary); }
+.editor-actions { display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
+.avatar-grid { display:grid; grid-template-columns:repeat(8,1fr); gap:6px; }
+.avatar-opt { width:40px; height:40px; border-radius:var(--radius-sm); border:1px solid var(--border);
+    background:var(--surface-2); display:flex; align-items:center; justify-content:center;
+    font-size:20px; cursor:pointer; transition:var(--transition); }
+.avatar-opt:hover, .avatar-opt.sel { border-color:var(--primary); background:rgba(108,92,231,.15); }
+.toast { position:fixed; bottom:24px; right:24px; background:var(--surface-2); border:1px solid var(--border);
+    border-left:4px solid var(--green); padding:14px 18px; border-radius:var(--radius-sm); z-index:1000;
+    box-shadow:var(--shadow); font-size:13px; max-width:380px; transform:translateY(20px); opacity:0;
+    transition:var(--transition); pointer-events:none; }
+.toast.show { transform:translateY(0); opacity:1; }
+.toast.err { border-left-color:var(--red); }
+.toast.warn { border-left-color:var(--yellow); }
+.empty { text-align:center; color:var(--text-dim); padding:30px 10px; font-size:13px; }
+.spin { display:inline-block; width:14px; height:14px; border:2px solid var(--border);
+    border-top-color:var(--primary); border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
+.vteam { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:6px; }
+@media (max-width: 640px) { .vteam { grid-template-columns:1fr; } }
+.vteam-card { background:var(--surface-2); border:1px solid var(--border); border-radius:var(--radius-sm);
+    padding:12px; font-size:12px; }
+.vteam-card b { color:var(--accent-light); }
+.vteam-card .m { color:var(--blue); font-family:Consolas,monospace; font-size:11px; display:block; margin-top:4px; }
+.section-title { font-size:13px; font-weight:700; color:var(--text-muted); text-transform:uppercase;
+    letter-spacing:.6px; margin:6px 0 10px; display:flex; align-items:center; gap:8px; }
+.hint { font-size:11px; color:var(--text-dim); margin-top:4px; }
+</style>
+</head>
+<body>
+<header class="app-header">
+    <div class="header-left">
+        <div class="logo-icon"><i class="fas fa-robot"></i></div>
+        <div class="header-title">
+            <h1>Odysseus <span>V2</span></h1>
+            <p>Administração de Agentes Personalizados</p>
+        </div>
+    </div>
+    <div class="header-right">
+        <a href="/odysseus/dashboard" class="btn"><i class="fas fa-chart-line"></i> Dashboard</a>
+        <button class="btn primary" onclick="createAgent()"><i class="fas fa-plus"></i> Novo Agente</button>
+    </div>
+</header>
+
+<div class="wrap">
+    <!-- Lista -->
+    <div class="panel">
+        <div class="panel-head">
+            <h2><i class="fas fa-users" style="color:var(--primary-light)"></i> Agentes <span class="count" id="agentCount">0</span></h2>
+        </div>
+        <div class="panel-body">
+            <div class="search-box">
+                <i class="fas fa-search"></i>
+                <input type="text" id="searchInput" placeholder="Pesquisar agentes..." oninput="renderList()">
+            </div>
+            <div class="agent-list" id="agentList"><div class="empty">A carregar...</div></div>
+            <div class="section-title" style="margin-top:16px"><i class="fas fa-users-cog"></i> Equipa Virtual</div>
+            <div class="vteam" id="vteam"></div>
+        </div>
+    </div>
+
+    <!-- Editor -->
+    <div class="panel editor">
+        <div class="panel-head">
+            <h2 id="editorTitle"><i class="fas fa-plus-circle" style="color:var(--green-light)"></i> Novo Agente</h2>
+        </div>
+        <div class="panel-body">
+            <div class="grid2">
+                <div class="field">
+                    <label>Nome *</label>
+                    <input type="text" id="fName" placeholder="ex: vistos">
+                </div>
+                <div class="field">
+                    <label>Categoria</label>
+                    <input type="text" id="fCategory" placeholder="ex: Negócios, Jurídico, Visas...">
+                </div>
+                <div class="field">
+                    <label>Modelo</label>
+                    <select id="fModel"></select>
+                </div>
+                <div class="field">
+                    <label>Prioridade</label>
+                    <input type="number" id="fPriority" min="0" max="10" value="0">
+                </div>
+                <div class="field">
+                    <label>Temperatura</label>
+                    <input type="number" id="fTemp" step="0.1" min="0" max="2" value="0.7">
+                </div>
+                <div class="field">
+                    <label>Tokens máximos</label>
+                    <input type="number" id="fMaxTokens" min="128" max="32768" value="2048">
+                </div>
+            </div>
+
+            <div class="field">
+                <label>Descrição</label>
+                <input type="text" id="fDesc" placeholder="O que este agente faz">
+            </div>
+
+            <div class="field">
+                <label>Avatar</label>
+                <div class="avatar-grid" id="avatarGrid"></div>
+            </div>
+
+            <div class="section-title"><i class="fas fa-tags"></i> Palavras-chave</div>
+            <div class="kw-row">
+                <input type="text" id="kwInput" placeholder="Adicionar palavra-chave..." style="flex:1;padding:10px 12px;border-radius:var(--radius-sm);border:1px solid var(--border);background:var(--surface-2);color:var(--text);font-family:var(--font);font-size:13px;outline:none">
+                <button class="btn small" onclick="addKeyword()"><i class="fas fa-plus"></i> Adicionar</button>
+            </div>
+            <div class="kw-chips" id="kwChips"></div>
+            <div class="hint">O agente é selecionado automaticamente quando a pergunta contém estas palavras.</div>
+
+            <div class="section-title" style="margin-top:14px"><i class="fas fa-keyboard"></i> Prompt do Agente (formação)</div>
+            <div class="prompt-editor">
+                <textarea id="fPrompt" spellcheck="false" placeholder="Tu és o agente especializado 'X' do Odysseus V2...&#10;Define aqui o papel, regras e conhecimento do agente."></textarea>
+            </div>
+            <div class="editor-actions">
+                <button class="btn primary" onclick="saveAgent()"><i class="fas fa-save"></i> Guardar</button>
+                <button class="btn" onclick="restoreAgent()" title="Restaurar do disco (descarta edições não gravadas)"><i class="fas fa-undo"></i> Restaurar</button>
+                <button class="btn" onclick="duplicateAgent()" title="Duplicar este agente"><i class="fas fa-copy"></i> Duplicar</button>
+                <button class="btn danger" id="deleteBtn" onclick="deleteAgent()" title="Remover este agente"><i class="fas fa-trash"></i> Eliminar</button>
+            </div>
+
+            <div class="section-title" style="margin-top:14px"><i class="fas fa-wrench"></i> Ferramentas permitidas</div>
+            <div class="tools-grid" id="toolsGrid"></div>
+        </div>
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '/api/v2/agent-config';
+let state = { agents: [], models: [], selected: null, dirty: false };
+let lastSaved = null; // snapshot para restaurar
+
+const AVATARS = ['🤖','👨‍💼','👩‍💼','🧑‍💻','💼','📊','⚖️','🧠','🛡️','📚','✈️','🏦','🧮','🔬','📧','🗓️'];
+const TOOLS = ['terminal','file_editor','web_search','code_execution','email','calendar','crm'];
+
+async function api(path, opts = {}) {
+    const resp = await fetch(API + path, {
+        headers: { 'Content-Type': 'application/json' },
+        ...opts,
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.detail || data.message || ('Erro ' + resp.status));
+    return data;
+}
+
+function toast(msg, type = 'ok') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast show' + (type === 'err' ? ' err' : type === 'warn' ? ' warn' : '');
+    setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+async function loadAll() {
+    try {
+        const data = await api('/config');
+        state.agents = data.agents || [];
+        state.models = data.models || [];
+        renderList();
+        renderModels();
+        renderVTeam(data.virtual_team || []);
+        document.getElementById('agentCount').textContent = state.agents.length;
+        if (!state.selected && state.agents.length) selectAgent(state.agents[0].name);
+    } catch (e) {
+        toast('Erro ao carregar: ' + e.message, 'err');
+    }
+}
+
+function renderList() {
+    const q = (document.getElementById('searchInput').value || '').toLowerCase();
+    const list = document.getElementById('agentList');
+    const filtered = state.agents.filter(a => {
+        const hay = ((a.name || '') + ' ' + (a.description || '') + ' ' + (a.category || '')).toLowerCase();
+        return hay.includes(q);
+    });
+    if (!filtered.length) { list.innerHTML = '<div class="empty">Nenhum agente encontrado.</div>'; return; }
+    list.innerHTML = filtered.map(a => {
+        const on = a.enabled !== false;
+        return `<div class="agent-card ${state.selected && state.selected.name === a.name ? 'active' : ''}" data-name="${a.name}" onclick="selectAgent('${a.name}')">
+            <div class="agent-avatar">${a.avatar || '🤖'}</div>
+            <div class="agent-meta">
+                <div class="name">${a.name} <span class="tag cat">${a.category || 'geral'}</span></div>
+                <div class="desc">${a.description || ''}</div>
+                <div class="tags">
+                    <span class="tag model">${a.model || 'auto'}</span>
+                    ${(a.priority || 0) > 0 ? `<span class="tag prio">prio ${a.priority}</span>` : ''}
+                    ${on ? '' : '<span class="tag off">desativado</span>'}
+                </div>
+            </div>
+            <button class="toggle ${on ? 'on' : ''}" title="${on ? 'Desativar' : 'Ativar'}"
+                onclick="event.stopPropagation(); toggleAgent('${a.name}')"></button>
+        </div>`;
+    }).join('');
+}
+
+function renderModels() {
+    const sel = document.getElementById('fModel');
+    const current = state.selected ? state.selected.model : '';
+    sel.innerHTML = '<option value="">auto (equipa virtual)</option>' + state.models.map(m =>
+        `<option value="${m}" ${m === current ? 'selected' : ''}>${m}</option>`).join('');
+}
+
+function renderVTeam(team) {
+    document.getElementById('vteam').innerHTML = team.map(t => `
+        <div class="vteam-card">
+            <b>${t.name}</b><span class="m">${t.model}</span>
+            <span style="color:var(--text-muted)">${(t.responsibilities || []).slice(0,3).join(', ')}...</span>
+        </div>`).join('');
+}
+
+function renderAvatarGrid() {
+    const cur = state.selected ? (state.selected.avatar || '🤖') : '🤖';
+    document.getElementById('avatarGrid').innerHTML = AVATARS.map(a =>
+        `<div class="avatar-opt ${a === cur ? 'sel' : ''}" onclick="setAvatar('${a}')">${a}</div>`).join('');
+}
+
+function renderTools() {
+    const allowed = state.selected ? (state.selected.tools || []) : [];
+    document.getElementById('toolsGrid').innerHTML = TOOLS.map(t =>
+        `<label class="check-row"><input type="checkbox" ${allowed.includes(t) ? 'checked' : ''}
+            onchange="toggleTool('${t}', this.checked)"> ${t.replace(/_/g, ' ')}</label>`).join('');
+}
+
+function renderKwChips() {
+    const kws = state.selected ? (state.selected.keywords || []) : [];
+    document.getElementById('kwChips').innerHTML = kws.length ? kws.map((k, i) =>
+        `<span class="chip">${k} <button onclick="removeKeyword(${i})"><i class="fas fa-times"></i></button></span>`).join('')
+        : '<span class="hint">Sem palavras-chave — o agente só será chamado manualmente.</span>';
+}
+
+function selectAgent(name) {
+    const a = state.agents.find(x => x.name === name);
+    if (!a) return;
+    state.selected = JSON.parse(JSON.stringify(a));
+    lastSaved = JSON.parse(JSON.stringify(a));
+    document.getElementById('editorTitle').innerHTML = `<i class="fas fa-edit" style="color:var(--accent-light)"></i> ${a.name}`;
+    document.getElementById('fName').value = a.name || '';
+    document.getElementById('fName').readOnly = true; // renomear não é suportado — duplica em vez disso
+    document.getElementById('fCategory').value = a.category || '';
+    document.getElementById('fDesc').value = a.description || '';
+    document.getElementById('fPriority').value = a.priority || 0;
+    document.getElementById('fTemp').value = a.temperature != null ? a.temperature : 0.7;
+    document.getElementById('fMaxTokens').value = a.max_tokens || 2048;
+    document.getElementById('fPrompt').value = a.system_prompt || '';
+    document.getElementById('deleteBtn').style.display = '';
+    renderModels(); renderAvatarGrid(); renderTools(); renderKwChips();
+    renderList();
+}
+
+function newAgentDefaults() {
+    state.selected = { name: '', description: '', category: 'geral', avatar: '🤖',
+        keywords: [], system_prompt: '', model: '', enabled: true, temperature: 0.7,
+        max_tokens: 2048, tools: [], priority: 0 };
+    lastSaved = null;
+    document.getElementById('editorTitle').innerHTML = '<i class="fas fa-plus-circle" style="color:var(--green-light)"></i> Novo Agente';
+    ['fName','fCategory','fDesc','fPrompt'].forEach(id => document.getElementById(id).value = '');
+    document.getElementById('fName').readOnly = false;
+    document.getElementById('fPriority').value = 0;
+    document.getElementById('fTemp').value = 0.7;
+    document.getElementById('fMaxTokens').value = 2048;
+    document.getElementById('deleteBtn').style.display = 'none';
+    renderModels(); renderAvatarGrid(); renderTools(); renderKwChips(); renderList();
+}
+
+function createAgent() { newAgentDefaults(); }
+
+function currentSpec() {
+    return {
+        name: document.getElementById('fName').value.trim(),
+        description: document.getElementById('fDesc').value.trim(),
+        category: document.getElementById('fCategory').value.trim() || 'geral',
+        model: document.getElementById('fModel').value,
+        priority: parseInt(document.getElementById('fPriority').value) || 0,
+        temperature: parseFloat(document.getElementById('fTemp').value) || 0.7,
+        max_tokens: parseInt(document.getElementById('fMaxTokens').value) || 2048,
+        system_prompt: document.getElementById('fPrompt').value,
+        keywords: state.selected ? (state.selected.keywords || []) : [],
+        avatar: state.selected ? (state.selected.avatar || '🤖') : '🤖',
+        tools: state.selected ? (state.selected.tools || []) : [],
+        enabled: state.selected ? state.selected.enabled !== false : true,
+    };
+}
+
+async function saveAgent() {
+    const spec = currentSpec();
+    if (!spec.name) { toast('O nome do agente é obrigatório.', 'warn'); return; }
+    try {
+        const existing = state.agents.find(a => a.name === (lastSaved || {}).name);
+        const url = existing ? `/agents/${encodeURIComponent(lastSaved.name)}` : '/agents';
+        const method = existing ? 'PUT' : 'POST';
+        const body = existing ? { ...spec } : spec;
+        if (existing) body.name = lastSaved.name; // o nome é read-only ao editar
+        const res = await api(url, { method, body: JSON.stringify(body) });
+        toast(res.message || 'Agente gravado em user_config.json ✓');
+        await loadAll();
+        selectAgent(res.agent ? res.agent.name : (existing ? lastSaved.name : spec.name));
+    } catch (e) { toast('Erro ao guardar: ' + e.message, 'err'); }
+}
+
+async function toggleAgent(name) {
+    try {
+        const res = await api(`/agents/${encodeURIComponent(name)}/toggle`, { method: 'PATCH' });
+        toast(res.message);
+        await loadAll();
+    } catch (e) { toast(e.message, 'err'); }
+}
+
+async function deleteAgent() {
+    if (!lastSaved) return;
+    if (!confirm(`Eliminar o agente '${lastSaved.name}'? Esta ação não pode ser desfeita.`)) return;
+    try {
+        const res = await api(`/agents/${encodeURIComponent(lastSaved.name)}`, { method: 'DELETE' });
+        toast(res.message || 'Agente eliminado.');
+        state.selected = null; lastSaved = null;
+        await loadAll();
+    } catch (e) { toast(e.message, 'err'); }
+}
+
+async function duplicateAgent() {
+    if (!lastSaved) { toast('Seleciona um agente primeiro.', 'warn'); return; }
+    try {
+        const res = await api(`/agents/${encodeURIComponent(lastSaved.name)}/duplicate`, { method: 'POST' });
+        toast(res.message);
+        await loadAll();
+        selectAgent(res.agent.name);
+    } catch (e) { toast(e.message, 'err'); }
+}
+
+async function restoreAgent() {
+    if (!lastSaved) return;
+    try {
+        const res = await api(`/agents/${encodeURIComponent(lastSaved.name)}/restore`, { method: 'POST' });
+        state.selected = res.agent;
+        document.getElementById('fPrompt').value = res.agent.system_prompt || '';
+        renderKwChips(); renderAvatarGrid(); renderTools();
+        toast(res.message || 'Agente restaurado do disco.');
+    } catch (e) { toast(e.message, 'err'); }
+}
+
+function addKeyword() {
+    const input = document.getElementById('kwInput');
+    const kw = input.value.trim().toLowerCase();
+    if (!kw) return;
+    if (!state.selected) state.selected = newAgentDefaults() && state.selected;
+    if (!state.selected.keywords) state.selected.keywords = [];
+    if (!state.selected.keywords.includes(kw)) {
+        state.selected.keywords.push(kw);
+        renderKwChips();
+    }
+    input.value = '';
+}
+
+function removeKeyword(i) {
+    if (state.selected && state.selected.keywords) {
+        state.selected.keywords.splice(i, 1);
+        renderKwChips();
+    }
+}
+
+function setAvatar(a) {
+    if (state.selected) { state.selected.avatar = a; renderAvatarGrid(); }
+}
+
+function toggleTool(t, on) {
+    if (!state.selected) return;
+    if (!state.selected.tools) state.selected.tools = [];
+    if (on && !state.selected.tools.includes(t)) state.selected.tools.push(t);
+    if (!on) state.selected.tools = state.selected.tools.filter(x => x !== t);
+}
+
+document.getElementById('kwInput').addEventListener('keydown', e => { if (e.key === 'Enter') addKeyword(); });
+
+loadAll();
+</script>
+</body>
+</html>
