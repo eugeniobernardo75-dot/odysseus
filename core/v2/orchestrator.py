@@ -31,6 +31,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 
+from .execution_context import read_context
 from .execution_policy import (
     DEFAULT_PURPOSE,
     PURPOSES,
@@ -1404,11 +1405,13 @@ class OdysseusOrchestrator:
                                  approval_id: Optional[str] = None) -> AgentResult:
         """Executa um passo de ferramenta pelo ToolManager.
 
-        O contexto é o do servidor (`self._tool_context`), resolvido a partir das
-        raízes aprovadas — nunca o workspace escolhido pelo agente ou pelo
-        chamador. A aprovação continua a ser exigida pelo ToolManager: se faltar,
-        devolve-se o pedido de aprovação em vez de executar.
+        O contexto é capturado via `read_context(self)` — um snapshot
+        imutável do estado do Orchestrator no início do passo, em vez de
+        depender diretamente de `self._tool_context`. A aprovação continua
+        a ser exigida pelo ToolManager: se faltar, devolve-se o pedido de
+        aprovação em vez de executar.
         """
+        ctx = read_context(self)
         task_id = f"TOOL-{uuid.uuid4().hex[:8].upper()}"
         tool_name = (step.tool or "").strip()
 
@@ -1429,7 +1432,7 @@ class OdysseusOrchestrator:
             result = await self._tool_manager.execute(
                 tool_name,
                 dict(step.tool_params or {}),
-                context=self._tool_context,
+                context=dict(ctx.tool_context),
                 approval_id=approval_id,
                 allowed_tools=self._worker_tool_allowlist(plan.delegated_worker),
             )
@@ -1477,7 +1480,7 @@ class OdysseusOrchestrator:
                     "metadata": result.metadata,
                     "warnings": result.warnings,
                 },
-                "workspace": self._tool_context.get("workspace_path"),
+                "workspace": ctx.tool_context.get("workspace_path"),
             },
             error=result.error,
         )
