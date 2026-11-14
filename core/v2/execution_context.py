@@ -18,10 +18,26 @@ Design:
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 import uuid
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Mapping, Optional
+
+
+# ContextVar async-safe que isola o contexto por task.
+# Cada pedido activa o seu com `with _current_ctx.set(ctx):`.
+# Dois pedidos em paralelo têm ContextVars independentes.
+#
+# Estado actual (5.3a): nenhum código activa o ContextVar.
+# read_context lê-o primeiro, mas como nunca é activado, cai
+# sempre para from_orchestrator (compatibilidade).
+#
+# 5.3b vai activar via process/process_stream.
+# 5.3c remove from_orchestrator de read_context.
+_current_ctx: ContextVar[Optional["ExecutionContext"]] = ContextVar(
+    "odysseus_execution_context", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -68,13 +84,19 @@ def read_context(
     orch: Any,
     request_id: Optional[str] = None,
 ) -> ExecutionContext:
-    """Retorna o contexto do pedido, criando um se ainda não existir.
+    """Retorna o contexto do pedido.
 
-    Fase 5.1: sempre cria a partir do estado do Orchestrator.
-    Fase 5.2: se o Orchestrator tiver `_current_context` (um
-    ExecutionContext), devolve-o; senão delega em from_orchestrator.
-    Fase 5.3: só `_current_context` conta.
+    Ordem de resolução (5.3a):
+      1. ContextVar activo (5.3b vai activá-lo em process)
+      2. Atributo legado `orch._current_context` (compat)
+      3. Snapshot do Orchestrator via from_orchestrator (5.1)
+
+    Quando 5.3b activar o ContextVar, o passo 1 domina; os
+    passos 2 e 3 ficam como fallback até 5.3c os remover.
     """
+    active = _current_ctx.get()
+    if active is not None:
+        return active
     existing = getattr(orch, "_current_context", None)
     if isinstance(existing, ExecutionContext):
         return existing
