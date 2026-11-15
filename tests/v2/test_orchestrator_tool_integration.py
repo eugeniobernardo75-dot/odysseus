@@ -161,9 +161,14 @@ class TestOrchestratorToolExecution:
         assert not any(r.details and r.details.get("tool_result") for r in response.agent_results)
 
     @pytest.mark.asyncio
-    async def test_approved_tool_step_executes_really(self, safety):
+    async def test_approved_tool_step_executes_really(self, safety, monkeypatch):
         """Execução real através do Orchestrator, com aprovação humana."""
         from core.v2.execution_policy import approved_root
+
+        # --- CORREÇÃO DO VAZAMENTO DE ESTADO ---
+        # Remove a variável de ambiente que outro teste deixou ligada
+        monkeypatch.delenv("ODYSSEUS_V2_REQUIRE_ISOLATION", raising=False)
+        # --------------------------------------
 
         orch = _make_orchestrator()
         plan = _tool_plan(tool_params={"command": "git status"})
