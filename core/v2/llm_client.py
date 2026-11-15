@@ -454,14 +454,22 @@ class LLMClient:
         return _detect_provider(url)
 
     def _get_request_target(self) -> tuple[str, str]:
-        """Use Ollama's native API when its local endpoint resolves through /v1."""
+        """Força API nativa Ollama para qualquer URL em :11434.
+
+        Histórico: detecção via _is_ollama_openai_compat_url era
+        inconsistente — o mesmo URL (http://host:11434/v1/chat/completions)
+        passava para /api/chat num pedido mas caía em /v1/chat/completions
+        noutro, causando 60s+ de thinking sem think:false. Detecção
+        agora é feita só por porta, sem depender de heurística de path.
+        """
         chat_url = self._get_chat_url()
         provider = self._get_provider()
-        from src.llm_core import _is_ollama_openai_compat_url
-
-        if _is_ollama_openai_compat_url(chat_url):
+        try:
             parsed = urlsplit(chat_url)
-            return f"{parsed.scheme}://{parsed.netloc}/api/chat", "ollama"
+            if parsed.port == 11434:
+                return f"{parsed.scheme}://{parsed.netloc}/api/chat", "ollama"
+        except (ValueError, AttributeError):
+            pass
         return chat_url, provider
 
     def _ollama_request_denied(self) -> bool:
@@ -927,6 +935,16 @@ class LLMClient:
                 if provider == "mistral":
                     payload["reasoning_effort"] = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
 
+                # Defesa em profundidade: se 1A não apanhar (ex.: URLs com
+                # hostname weird), enviamos think:false também aqui. Ollama
+                # aceita campos extra no formato OpenAI-compat; outros providers
+                # ignoram ou rejeitam, por isso só o fazemos para :11434.
+                try:
+                    if urlsplit(chat_url).port == 11434:
+                        payload["think"] = False
+                except (ValueError, AttributeError):
+                    pass
+
                 client = await self._get_client()
 
                 logger.debug(
@@ -1040,7 +1058,7 @@ class LLMClient:
                 api_url = chat_url if chat_url.endswith("/v1/messages") else chat_url.rstrip("/") + "/v1/messages"
 
                 async with client.stream("POST", api_url, json=payload, headers=headers,
-                                          timeout=_stream_timeout(self.config.timeout)) as resp:
+                                          timeout=_stream_timeout(max(self.config.timeout, 180.0))) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         from src.llm_core import _format_upstream_error
@@ -1080,7 +1098,7 @@ class LLMClient:
                 client = await self._get_client()
 
                 async with client.stream("POST", chat_url, json=payload,
-                                          timeout=_stream_timeout(self.config.timeout)) as resp:
+                                          timeout=_stream_timeout(max(self.config.timeout, 180.0))) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         yield f"\n\n❌ Erro do Ollama (status {resp.status_code}): {body[:500].decode(errors='ignore')}"
@@ -1112,7 +1130,7 @@ class LLMClient:
                 codex_url = chat_url if chat_url.endswith("/responses") else chat_url.rstrip("/") + "/responses"
 
                 async with client.stream("POST", codex_url, json=payload, headers=headers,
-                                          timeout=_stream_timeout(self.config.timeout)) as resp:
+                                          timeout=_stream_timeout(max(self.config.timeout, 180.0))) as resp:
                     if resp.status_code != 200:
                         from src.llm_core import _format_chatgpt_subscription_error
                         yield f"\n\n❌ {_format_chatgpt_subscription_error(resp.status_code, (await resp.aread())[:500])}"
@@ -1166,10 +1184,20 @@ class LLMClient:
                 if provider == "mistral":
                     payload["reasoning_effort"] = os.getenv("ODYSSEUS_MISTRAL_REASONING_EFFORT", "high")
 
+                # Defesa em profundidade: se 1A não apanhar (ex.: URLs com
+                # hostname weird), enviamos think:false também aqui. Ollama
+                # aceita campos extra no formato OpenAI-compat; outros providers
+                # ignoram ou rejeitam, por isso só o fazemos para :11434.
+                try:
+                    if urlsplit(chat_url).port == 11434:
+                        payload["think"] = False
+                except (ValueError, AttributeError):
+                    pass
+
                 client = await self._get_client()
 
                 async with client.stream("POST", api_url, json=payload, headers=headers,
-                                          timeout=_stream_timeout(self.config.timeout)) as resp:
+                                          timeout=_stream_timeout(max(self.config.timeout, 180.0))) as resp:
                     if resp.status_code != 200:
                         body = await resp.aread()
                         from src.llm_core import _format_upstream_error
@@ -1202,7 +1230,8 @@ class LLMClient:
                 return
 
         except Exception as e:
-            error_str = str(e)
+            # TimeoutError tem str() vazio — incluir tipo para diagnóstico.
+            error_str = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
             logger.warning("Erro no streaming LLM: %s", error_str)
             yield f"\n\n❌ Erro de comunicação: {error_str}"
             yield "__DONE__"

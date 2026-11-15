@@ -8,6 +8,7 @@ Provides token estimation for context usage tracking.
 import ipaddress
 import logging
 import sys
+import time
 from typing import Dict, List, Optional, Tuple
 
 from urllib.parse import urlparse
@@ -237,6 +238,59 @@ KNOWN_CONTEXT_WINDOWS = {
     'solar': 32768,
 }
 
+_OLLAMA_CONTEXT_CACHE: Dict[Tuple[str, str], Tuple[int, float]] = {}
+
+
+def _fetch_ollama_context_length(model: str, endpoint_url: str) -> Optional[int]:
+    """Ask Ollama for the real context length and cache it for one hour."""
+    if not endpoint_url:
+        return None
+    try:
+        parsed = urlparse(endpoint_url)
+        host = (parsed.hostname or "").lower()
+        if host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"} and parsed.port != 11434:
+            return None
+    except Exception:
+        return None
+
+    cache_key = (endpoint_url, model)
+    cached = _OLLAMA_CONTEXT_CACHE.get(cache_key)
+    if cached and (time.time() - cached[1]) < 3600:
+        return cached[0]
+
+    try:
+        base = endpoint_url.rstrip("/")
+        if base.endswith("/v1"):
+            base = base[:-3]
+        response = httpx.post(
+            f"{base}/api/show",
+            json={"model": model},
+            timeout=3.0,
+        )
+        if response.status_code != 200:
+            return None
+        data = response.json()
+        info = data.get("model_info") or {}
+        ctx = (
+            info.get("qwen3.context_length")
+            or info.get("qwen35.context_length")
+            or info.get("llama.context_length")
+            or info.get("gemma.context_length")
+            or data.get("context_length")
+        )
+        for key, value in info.items():
+            if isinstance(key, str) and key.endswith(".context_length") and isinstance(value, (int, float)) and value > 0:
+                ctx = value
+                break
+        if isinstance(ctx, (int, float)) and ctx > 0:
+            value = int(ctx)
+            _OLLAMA_CONTEXT_CACHE[cache_key] = (value, time.time())
+            return value
+    except Exception:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
@@ -401,6 +455,11 @@ def _proxy_catalog_context(endpoint_url: str, model: str) -> Optional[int]:
 def _query_context_length(endpoint_url: str, model: str) -> Tuple[int, bool]:
     """Query the model API for context length. Returns (context_length, known) where
     ``known`` is False only for the bare DEFAULT_CONTEXT fallback."""
+    ollama_ctx = _fetch_ollama_context_length(model, endpoint_url)
+    if ollama_ctx:
+        logger.info(f"Ollama /api/show reports context window for {model}: {ollama_ctx}")
+        return ollama_ctx, True
+
     known = _lookup_known(model)
     api_ctx = None
     configured_kind = _configured_endpoint_kind(endpoint_url)
