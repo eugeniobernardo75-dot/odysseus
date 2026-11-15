@@ -31,7 +31,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, AsyncGenerator, Optional
 
-from .execution_context import read_context
+from .execution_context import read_context, _current_ctx
+from .execution_context import ExecutionContext
 from .execution_policy import (
     DEFAULT_PURPOSE,
     PURPOSES,
@@ -485,158 +486,164 @@ class OdysseusOrchestrator:
         6. Valida resultados
         7. Retorna resposta
         """
-        # Sanitizar entrada
-        safe_message = self.safety.sanitize_input(user_message)
+        # Fase 5.3b: captura o contexto do pedido para isolamento.
+        _ctx = ExecutionContext.from_orchestrator(self)
+        _ctx_token = _current_ctx.set(_ctx)
+        try:
+            # Sanitizar entrada
+            safe_message = self.safety.sanitize_input(user_message)
 
-        # ── Perímetro decidido pelo servidor ──
-        # As chaves reservadas do contexto do chamador (workspace_path, cwd,
-        # workdir, allow_interpreters) são descartadas: o agente não escolhe nem
-        # alarga o próprio perímetro. O contexto das ferramentas é reconstruído
-        # a partir das raízes aprovadas.
-        context = sanitize_caller_context(context)
-        knowledge = useragent_knowledge if isinstance(useragent_knowledge, list) else []
-        history = self._normalize_conversation_history(
-            conversation_history, safe_message
-        )
-
-        # Propósito pedido pelo *servidor* (nunca pelo contexto do chamador).
-        # Um propósito inválido não executa nada: fail-closed.
-        if purpose is not None and not self.set_purpose(purpose):
-            return OrchestratorResponse(
-                message=(
-                    f"❌ Propósito inválido: '{purpose}'. Válidos: "
-                    f"{', '.join(sorted(PURPOSES))}."
-                ),
-                metadata={"invalid_purpose": True, "purpose": purpose},
+            # ── Perímetro decidido pelo servidor ──
+            # As chaves reservadas do contexto do chamador (workspace_path, cwd,
+            # workdir, allow_interpreters) são descartadas: o agente não escolhe nem
+            # alarga o próprio perímetro. O contexto das ferramentas é reconstruído
+            # a partir das raízes aprovadas.
+            context = sanitize_caller_context(context)
+            knowledge = useragent_knowledge if isinstance(useragent_knowledge, list) else []
+            history = self._normalize_conversation_history(
+                conversation_history, safe_message
             )
 
-        self._current_approval_id = approval_id
-        self._tool_context = build_tool_context(self.workspace_purpose)
-
-        # Retomar aprovação no mesmo processo: reutilizar o plano original,
-        # evitando que um novo ciclo LLM altere fingerprint, comando ou args.
-        if approval_id and approval_id in self._pending_plans:
-            return await self.resume_approved_plan(
-                approval_id, useragent_knowledge=knowledge
-            )
-
-        # Modo MANUAL: se o utilizador pediu um modelo concreto (ex. qwen3:8b
-        # aberto diretamente), o Orchestrator respeita a escolha e não redireciona.
-        forced_model = None
-        if context:
-            req_model = context.get("model") or context.get("forced_model")
-            if req_model and str(req_model).strip() not in ("", "odysseus-v2"):
-                forced_model = str(req_model).strip()
-
-        # Comandos especiais que SEMPRE usam template (precisam de resposta estruturada)
-        special = self._handle_special_commands(safe_message.lower())
-        if special:
-            return OrchestratorResponse(message=special)
-
-        # Analisar intenção
-        intent_analysis = self._analyse_intent(safe_message)
-
-        # Se precisar de agentes especializados
-        if intent_analysis.get("type") in ("task", "research"):
-            # Verificar segurança (com approval_id opcional)
-            safety_check = self.safety.check_action(
-                action_type=intent_analysis["type"],
-                description=f"Processar: {safe_message[:100]}",
-                existing_approval_id=approval_id,
-            )
-
-            if safety_check["requires_approval"]:
-                # Ação precisa de aprovação — devolver ID para o utilizador aprovar
+            # Propósito pedido pelo *servidor* (nunca pelo contexto do chamador).
+            # Um propósito inválido não executa nada: fail-closed.
+            if purpose is not None and not self.set_purpose(purpose):
                 return OrchestratorResponse(
                     message=(
-                        f"⚠️ Esta ação requer a sua aprovação.\n\n"
-                        f"**ID:** {safety_check['approval_id']}\n"
-                        f"**Risco:** {safety_check['risk']}\n"
-                        f"**Motivo:** {safety_check['message']}\n\n"
-                        f"Para aprovar, envia: `POST /api/v2/approve/{safety_check['approval_id']}`\n"
-                        f"Para negar, envia: `POST /api/v2/deny/{safety_check['approval_id']}`\n"
-                        f"Depois de aprovar, reenvia o pedido original com "
-                        f"`approval_id={safety_check['approval_id']}` para retomar "
-                        "o plano pendente."
+                        f"❌ Propósito inválido: '{purpose}'. Válidos: "
+                        f"{', '.join(sorted(PURPOSES))}."
                     ),
-                    requires_approval=[safety_check],
-                    metadata={"resolution_route": "approval_required"},
+                    metadata={"invalid_purpose": True, "purpose": purpose},
                 )
 
-            if not safety_check["allowed"]:
-                # Ação negada
-                return OrchestratorResponse(
-                    message=f"❌ Ação negada: {safety_check['message']}",
+            self._current_approval_id = approval_id
+            self._tool_context = build_tool_context(self.workspace_purpose)
+
+            # Retomar aprovação no mesmo processo: reutilizar o plano original,
+            # evitando que um novo ciclo LLM altere fingerprint, comando ou args.
+            if approval_id and approval_id in self._pending_plans:
+                return await self.resume_approved_plan(
+                    approval_id, useragent_knowledge=knowledge
                 )
 
-            # Ação permitida — criar e executar plano
-            plan = await self._create_plan(
-                safe_message,
-                intent_analysis,
-                useragent_knowledge=knowledge,
-                conversation_history=history,
-            )
-            self._bind_delegated_worker(plan, delegated_worker)
-            result = await self._execute_plan(
-                plan,
-                model=forced_model,
-                approval_id=approval_id,
-                useragent_knowledge=knowledge,
-            )
+            # Modo MANUAL: se o utilizador pediu um modelo concreto (ex. qwen3:8b
+            # aberto diretamente), o Orchestrator respeita a escolha e não redireciona.
+            forced_model = None
+            if context:
+                req_model = context.get("model") or context.get("forced_model")
+                if req_model and str(req_model).strip() not in ("", "odysseus-v2"):
+                    forced_model = str(req_model).strip()
 
-            # Aplicar reflexão se a resposta for suficientemente longa
-            if result.message and len(result.message) > 80:
-                reflected = await self._apply_reflection(safe_message, result.message)
-                if reflected and reflected.requires_revision and reflected.revised_response:
-                    result.message = reflected.revised_response
-                    result.metadata["reflection_applied"] = True
-                    result.metadata["reflection_score"] = reflected.quality_score
+            # Comandos especiais que SEMPRE usam template (precisam de resposta estruturada)
+            special = self._handle_special_commands(safe_message.lower())
+            if special:
+                return OrchestratorResponse(message=special)
 
-            result.metadata["knowledge_sources"] = [
-                item["path"] for item in knowledge
-                if isinstance(item, dict) and item.get("path")
-            ]
-            result.metadata["resolution_route"] = (
-                "delegated" if plan.delegated_worker else "planned"
-            )
-            result.metadata["delegated_worker"] = plan.delegated_worker
-            logger.info(
-                "Plano %s processado pela rota %s (Worker=%s).",
-                plan.id,
-                result.metadata["resolution_route"],
-                plan.delegated_worker or "none",
-            )
-            return result
+            # Analisar intenção
+            intent_analysis = self._analyse_intent(safe_message)
 
-        # Conversa normal — usar LLM ou fallback
-        response = await self._generate_llm_response(
-            safe_message,
-            model=forced_model,
-            useragent_knowledge=knowledge,
-            useragent_memory=useragent_memory,
-            conversation_history=history,
-        )
-        llm_used = response is not None
-        if response is None:
-            response = self._generate_fallback_response(safe_message, intent_analysis)
+            # Se precisar de agentes especializados
+            if intent_analysis.get("type") in ("task", "research"):
+                # Verificar segurança (com approval_id opcional)
+                safety_check = self.safety.check_action(
+                    action_type=intent_analysis["type"],
+                    description=f"Processar: {safe_message[:100]}",
+                    existing_approval_id=approval_id,
+                )
 
-        # Verificar sugestões de memória
-        suggested_memory = self._check_memory_suggestions(safe_message, response)
+                if safety_check["requires_approval"]:
+                    # Ação precisa de aprovação — devolver ID para o utilizador aprovar
+                    return OrchestratorResponse(
+                        message=(
+                            f"⚠️ Esta ação requer a sua aprovação.\n\n"
+                            f"**ID:** {safety_check['approval_id']}\n"
+                            f"**Risco:** {safety_check['risk']}\n"
+                            f"**Motivo:** {safety_check['message']}\n\n"
+                            f"Para aprovar, envia: `POST /api/v2/approve/{safety_check['approval_id']}`\n"
+                            f"Para negar, envia: `POST /api/v2/deny/{safety_check['approval_id']}`\n"
+                            f"Depois de aprovar, reenvia o pedido original com "
+                            f"`approval_id={safety_check['approval_id']}` para retomar "
+                            "o plano pendente."
+                        ),
+                        requires_approval=[safety_check],
+                        metadata={"resolution_route": "approval_required"},
+                    )
 
-        result = OrchestratorResponse(
-            message=response,
-            suggested_memory=suggested_memory,
-            metadata={
-                "llm_used": llm_used,
-                "resolution_route": "direct",
-                "knowledge_sources": [
+                if not safety_check["allowed"]:
+                    # Ação negada
+                    return OrchestratorResponse(
+                        message=f"❌ Ação negada: {safety_check['message']}",
+                    )
+
+                # Ação permitida — criar e executar plano
+                plan = await self._create_plan(
+                    safe_message,
+                    intent_analysis,
+                    useragent_knowledge=knowledge,
+                    conversation_history=history,
+                )
+                self._bind_delegated_worker(plan, delegated_worker)
+                result = await self._execute_plan(
+                    plan,
+                    model=forced_model,
+                    approval_id=approval_id,
+                    useragent_knowledge=knowledge,
+                )
+
+                # Aplicar reflexão se a resposta for suficientemente longa
+                if result.message and len(result.message) > 80:
+                    reflected = await self._apply_reflection(safe_message, result.message)
+                    if reflected and reflected.requires_revision and reflected.revised_response:
+                        result.message = reflected.revised_response
+                        result.metadata["reflection_applied"] = True
+                        result.metadata["reflection_score"] = reflected.quality_score
+
+                result.metadata["knowledge_sources"] = [
                     item["path"] for item in knowledge
                     if isinstance(item, dict) and item.get("path")
-                ],
-            },
-        )
-        logger.info("Pedido resolvido pela rota directa do UserAgent.")
-        return result
+                ]
+                result.metadata["resolution_route"] = (
+                    "delegated" if plan.delegated_worker else "planned"
+                )
+                result.metadata["delegated_worker"] = plan.delegated_worker
+                logger.info(
+                    "Plano %s processado pela rota %s (Worker=%s).",
+                    plan.id,
+                    result.metadata["resolution_route"],
+                    plan.delegated_worker or "none",
+                )
+                return result
+
+            # Conversa normal — usar LLM ou fallback
+            response = await self._generate_llm_response(
+                safe_message,
+                model=forced_model,
+                useragent_knowledge=knowledge,
+                useragent_memory=useragent_memory,
+                conversation_history=history,
+            )
+            llm_used = response is not None
+            if response is None:
+                response = self._generate_fallback_response(safe_message, intent_analysis)
+
+            # Verificar sugestões de memória
+            suggested_memory = self._check_memory_suggestions(safe_message, response)
+
+            result = OrchestratorResponse(
+                message=response,
+                suggested_memory=suggested_memory,
+                metadata={
+                    "llm_used": llm_used,
+                    "resolution_route": "direct",
+                    "knowledge_sources": [
+                        item["path"] for item in knowledge
+                        if isinstance(item, dict) and item.get("path")
+                    ],
+                },
+            )
+            logger.info("Pedido resolvido pela rota directa do UserAgent.")
+            return result
+        finally:
+            _current_ctx.reset(_ctx_token)
 
     async def resume_approved_plan(
         self,
