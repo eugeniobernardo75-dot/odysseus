@@ -56,7 +56,7 @@ from datetime import datetime, timezone
 from typing import Dict
 
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, Request, HTTPException
+from fastapi import Body, FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -200,6 +200,8 @@ _TIMEOUT_EXEMPT_PREFIXES = (
     "/api/image",           # diffusion proxies (inpaint/harmonize/upscale/etc.) — own 120s httpx timeout
     "/api/editor",          # editor agent/bridge: generative steps can take 30-110s (SAM + local diffusion)
     "/api/memory/audit",    # retains own 120s LLM inactivity timeout
+    "/api/v2/chat",         # V2 streaming chat
+    "/ws/dashboard",        # V2 WebSocket dashboard
 )
 
 
@@ -314,7 +316,7 @@ if AUTH_ENABLED:
         "/api/version",
         "/login",
     }
-    AUTH_EXEMPT_PREFIXES = ["/static"]
+    AUTH_EXEMPT_PREFIXES = ["/static", "/odysseus/dashboard", "/odysseus/agents"]
     # Dynamic paths whose own handler proves identity via a path-embedded
     # secret instead of the session/bearer auth. The route handler at
     # routes/task_routes.py validates the per-task `webhook_token` itself
@@ -973,6 +975,31 @@ app.include_router(setup_companion_routes())
 
 # ========= ROUTES (kept in app.py) =========
 
+# ── V2 Dashboard Page ──
+@app.get("/odysseus/agents")
+async def odysseus_v2_agents_admin_page(request: Request):
+    """Serve a página de administração de agentes personalizados V2."""
+    admin_path = abs_join(BASE_DIR, "static/v2/agents.html")
+    if os.path.exists(admin_path):
+        return serve_html_with_nonce(request, admin_path)
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Odysseus V2 Agents admin page not found"},
+    )
+
+
+@app.get("/odysseus/dashboard")
+async def odysseus_v2_dashboard_page(request: Request):
+    """Serve the Odysseus V2 Dashboard HTML page."""
+    dashboard_path = abs_join(BASE_DIR, "static/v2/dashboard.html")
+    if os.path.exists(dashboard_path):
+        return serve_html_with_nonce(request, dashboard_path)
+    return JSONResponse(
+        status_code=404,
+        content={"error": "Odysseus V2 Dashboard page not found"},
+    )
+
+
 @app.get("/")
 async def serve_index(request: Request):
     static_path = abs_join(BASE_DIR, "static/index.html")
@@ -1162,7 +1189,6 @@ async def runtime_info() -> Dict[str, object]:
         "capabilities": capabilities,
     }
 
-
 def _docker_default_gateway_ip() -> str:
     try:
         with open("/proc/net/route", "r", encoding="utf-8", errors="ignore") as fh:
@@ -1178,6 +1204,108 @@ def _docker_default_gateway_ip() -> str:
     except Exception:
         return ""
     return ""
+
+
+# ========= ODYSSEUS V2 ROUTES =========
+# V2 Chat endpoints
+from core.v2.api_bridge import process_request as v2_process_request
+from core.v2.llm_client import get_llm_client as v2_get_llm_client
+from core.v2.orchestrator import get_orchestrator as v2_get_orchestrator
+
+# NOTA: As rotas V2 abaixo sao registadas no `app` principal (definido no topo
+# deste ficheiro). Um `app = FastAPI()` aqui dentro re-criaria a aplicacao e
+# apagaria TODAS as rotas registadas anteriormente -- nao o fazer.
+
+@app.post("/api/v2/chat")
+async def odysseus_v2_chat(data: dict = Body(...)):
+    """Odysseus V2 Chat endpoint (non-streaming)."""
+    question = data.get("message")
+    context = data.get("context")
+    approval_id = data.get("approval_id")
+
+    if not question:
+        return {
+            "success": False,
+            "error": "Mensagem vazia",
+            "response": "Por favor, escreve uma mensagem para que eu possa ajudar-te.",
+        }
+
+    result = await v2_process_request(question, context=context, approval_id=approval_id)
+    return result
+
+
+@app.post("/api/v2/chat/stream")
+async def odysseus_v2_chat_stream(data: dict = Body(...)):
+    """Odysseus V2 Chat endpoint (SSE streaming)."""
+    from fastapi.responses import StreamingResponse
+    import json
+
+    question = data.get("message")
+    context = data.get("context")
+    approval_id = data.get("approval_id")
+
+    if not question:
+        async def _empty():
+            yield f"data: {json.dumps({'error': 'Mensagem vazia'})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+        return StreamingResponse(_empty(), media_type="text/event-stream")
+
+    from core.v2.user_agent_config import get_user_agent as v2_get_user_agent
+
+    async def event_stream():
+        yield f"data: {json.dumps({'type': 'metadata', 'coordinated_by': 'useragent'})}\n\n"
+        try:
+            async for token in v2_get_user_agent().process_stream(question, context=context):
+                if token == "__DONE__":
+                    yield f"data: {json.dumps({'done': True, 'coordinated_by': 'useragent'})}\n\n"
+                    return
+                yield f"data: {json.dumps({'token': token})}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'error': str(e)})}\n\n"
+            yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# V2 Approval routes
+from core.v2.approval_routes import setup_approval_routes as v2_setup_approval_routes
+app.include_router(v2_setup_approval_routes())
+logger.info("Odysseus V2 approval routes initialized")
+
+
+# V2 LLM Config routes
+from core.v2.llm_routes import setup_llm_routes as v2_setup_llm_routes
+app.include_router(v2_setup_llm_routes())
+logger.info("Odysseus V2 LLM config routes initialized")
+
+
+# V2 Data routes (Memory, Skills, Agents, Status)
+from core.v2.data_routes import setup_data_routes as v2_setup_data_routes
+app.include_router(v2_setup_data_routes())
+logger.info("Odysseus V2 data routes initialized")
+
+
+# V2 Agent-config routes (admin de agentes personalizados)
+from core.v2.agent_config_routes import setup_agent_config_routes as v2_setup_agent_config_routes
+app.include_router(v2_setup_agent_config_routes())
+logger.info("Odysseus V2 agent-config routes initialized")
+
+
+# V2 Dashboard routes (REST + WebSocket broadcast)
+from core.v2.dashboard_routes import (
+    setup_dashboard_routes as v2_setup_dashboard_routes,
+    start_dashboard_broadcast as v2_start_broadcast,
+    stop_dashboard_broadcast as v2_stop_broadcast,
+)
+app.include_router(v2_setup_dashboard_routes())
+logger.info("Odysseus V2 dashboard routes initialized")
 
 # ========= LIFECYCLE =========
 
@@ -1443,6 +1571,25 @@ async def _startup_event():
     from src.process_reaper import reap_orphans_at_startup
     _startup_tasks.append(asyncio.create_task(reap_orphans_at_startup()))
 
+    # ── Odysseus V2 Dashboard broadcast loop ──
+    try:
+        _startup_tasks.append(asyncio.create_task(v2_start_broadcast()))
+        logger.info("Odysseus V2 dashboard broadcast loop started")
+    except Exception as e:
+        logger.warning(f"Odysseus V2 dashboard broadcast loop failed to start: {e}")
+
+    # ── Odysseus V2 — Core V2 como cérebro principal (RC1) ──
+    # Regista o modelo "Odysseus V2" no picker (ModelEndpoint → bridge V2) e
+    # garante que o bridge v2_server.py está a correr (autostart). Nunca falha
+    # o arranque: falhas degradam para logs e o utilizador pode arrancar o
+    # bridge manualmente (python v2_server.py).
+    try:
+        from src.v2_bridge_integration import start_v2_bridge_integration
+        _startup_tasks.append(asyncio.create_task(start_v2_bridge_integration()))
+        logger.info("Odysseus V2 bridge integration scheduled at startup")
+    except Exception as e:
+        logger.warning(f"Odysseus V2 bridge integration failed to start: {e}")
+
     logger.info("Application startup complete")
 
 async def _shutdown_event():
@@ -1480,14 +1627,163 @@ async def _shutdown_event():
         await mcp_manager.disconnect_all()
     except Exception as e:
         logger.warning(f"MCP shutdown error: {e}")
+    # Stop Odysseus V2 dashboard broadcast
+    try:
+        await v2_stop_broadcast()
+    except Exception as e:
+        logger.warning(f"Odysseus V2 dashboard broadcast stop error: {e}")
     logger.info("Application shutdown complete")
 
 
+def _kill_orphan_processes(ports=(7000, 8001)) -> None:
+    """Mata processos órfãos que seguram portas críticas (7000 e 8001).
+
+    Antes de iniciar qualquer servidor, procura processos Python antigos
+    (v2_server.py, instâncias anteriores da app) a escutar nas portas
+    7000/8001 e termina-os — nunca mais é preciso taskkill manual.
+    """
+    import subprocess
+    try:
+        import psutil  # type: ignore
+        _kill_with_psutil(ports)
+        return
+    except ImportError:
+        pass
+    # Fallback: netstat + taskkill (Windows) / lsof + kill (POSIX)
+    if os.name == "nt":
+        try:
+            out = subprocess.run(
+                ["netstat", "-ano"], capture_output=True, text=True,
+                timeout=10, errors="ignore",
+            ).stdout or ""
+            pids = set()
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 5 and parts[0] in ("TCP", "UDP"):
+                    try:
+                        addr = parts[1]
+                        port = int(addr.rsplit(":", 1)[-1])
+                    except (ValueError, IndexError):
+                        continue
+                    if port in ports and parts[-1].isdigit():
+                        pids.add(int(parts[-1]))
+            # Só terminar processos Python (evita matar um serviço não relacionado).
+            # Formato tasklist /FO CSV /NH: "imagem","PID","sessão",... →
+            # split('"')[1] é o nome da imagem, [3] é o PID.
+            if pids:
+                tasklist = subprocess.run(
+                    ["tasklist", "/FO", "CSV", "/NH"], capture_output=True,
+                    text=True, timeout=10, errors="ignore",
+                ).stdout or ""
+                py_pids = set()
+                for row in tasklist.splitlines():
+                    if "python" not in row.lower():
+                        continue
+                    cols = row.split('"')
+                    if len(cols) > 3 and cols[3].strip().isdigit():
+                        py_pids.add(cols[3].strip())
+                pids = {p for p in pids if str(p) in py_pids}
+            for pid in pids:
+                if pid == os.getpid():
+                    continue
+                try:
+                    subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/F"],
+                        capture_output=True, timeout=10,
+                    )
+                    logger.warning(
+                        "Processo orfao na porta terminado: PID %s", pid
+                    )
+                except Exception as e:
+                    logger.debug("Nao foi possivel terminar PID %s: %s", pid, e)
+        except Exception as e:
+            logger.debug("Limpeza de orfaos falhou (Windows): %s", e)
+    else:
+        try:
+            for port in ports:
+                out = subprocess.run(
+                    ["lsof", "-ti", f":{port}"], capture_output=True,
+                    text=True, timeout=10, errors="ignore",
+                ).stdout or ""
+                for pid in out.split():
+                    if pid.isdigit() and int(pid) != os.getpid():
+                        subprocess.run(
+                            ["kill", "-9", pid], capture_output=True, timeout=10,
+                        )
+                        logger.warning("Processo orfao terminado: PID %s", pid)
+        except Exception as e:
+            logger.debug("Limpeza de orfaos falhou (POSIX): %s", e)
+
+
+def _kill_with_psutil(ports) -> None:
+    """Limpeza de orfaos usando psutil (quando disponivel)."""
+    import psutil  # type: ignore
+    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+        try:
+            if proc.info["pid"] == os.getpid():
+                continue
+            name = (proc.info.get("name") or "").lower()
+            cmdline = " ".join(proc.info.get("cmdline") or []).lower()
+            if "python" not in name and "python" not in cmdline:
+                continue
+            try:
+                conns = proc.connections()
+            except Exception:
+                conns = []
+            listening = any(
+                getattr(c, "laddr", None) is not None
+                and getattr(c.laddr, "port", None) in ports
+                for c in conns
+            )
+            is_bridge = "v2_server.py" in cmdline
+            if listening or is_bridge:
+                proc.kill()
+                logger.warning(
+                    "Processo orfao terminado: PID %s (%s)",
+                    proc.info["pid"], cmdline[:60],
+                )
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            continue
+
+
 if __name__ == "__main__":
+    import socket
+
     import uvicorn
+    # ── Limpeza automatica de processos orfaos (portas 7000/8001) ──
+    _kill_orphan_processes()
 
     bind_host = os.getenv("APP_BIND", "127.0.0.1")
     bind_port = int(os.getenv("APP_PORT", "7011"))
+
+
+    def _port_in_use(host: str, port: int) -> bool:
+        """True se a porta ja estiver ocupada por outro processo."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as _sock:
+            _sock.settimeout(0.5)
+            return _sock.connect_ex((host, port)) == 0
+
+
+    # Se a porta configurada ja estiver ocupada (ex.: instancia orfa de um
+    # arranque anterior), escolhe automaticamente a proxima porta livre em vez
+    # de falhar com um erro de bind confuso. Define APP_PORT para fixar a porta.
+    if _port_in_use(bind_host, bind_port):
+        _fallback = bind_port
+        while _port_in_use(bind_host, _fallback) and _fallback < bind_port + 100:
+            _fallback += 1
+        if _port_in_use(bind_host, _fallback):
+            logger.error(
+                "Porta %s (e alternativas até %s) ocupadas em %s — o arranque "
+                "vai falhar. Fecha o processo que usa a porta ou define APP_PORT.",
+                bind_port, bind_port + 100, bind_host,
+            )
+        else:
+            logger.warning(
+                "Porta %s ja esta ocupada em %s -- a usar porta alternativa %s "
+                "(define APP_PORT para fixar a porta).",
+                bind_port, bind_host, _fallback,
+            )
+        bind_port = _fallback
 
     # Give in-flight requests time to finish on SIGTERM instead of being cut
     # off mid-flight. Diffusion edits run 60-120 s; outpaint/extend can run up

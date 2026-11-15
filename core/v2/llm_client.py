@@ -799,7 +799,7 @@ class LLMClient:
                     chat_url if chat_url.endswith("/v1/messages") else chat_url.rstrip("/") + "/v1/messages",
                     json=payload,
                     headers=headers,
-                    timeout=_call_timeout(self.config.timeout),
+                    timeout=_call_timeout(max(self.config.timeout, 180.0)),
                 )
 
                 if resp.status_code != 200:
@@ -839,7 +839,7 @@ class LLMClient:
                 resp = await client.post(
                     chat_url,
                     json=payload,
-                    timeout=_call_timeout(self.config.timeout),
+                    timeout=_call_timeout(max(self.config.timeout, 180.0)),
                 )
 
                 if resp.status_code != 200:
@@ -877,7 +877,7 @@ class LLMClient:
                     codex_url,
                     json=payload,
                     headers=headers,
-                    timeout=_call_timeout(self.config.timeout),
+                    timeout=_call_timeout(max(self.config.timeout, 180.0)),
                 )
 
                 if resp.status_code != 200:
@@ -956,7 +956,7 @@ class LLMClient:
                     api_url,
                     json=payload,
                     headers=headers,
-                    timeout=_call_timeout(self.config.timeout),
+                    timeout=_call_timeout(max(self.config.timeout, 180.0)),
                 )
 
                 if resp.status_code != 200:

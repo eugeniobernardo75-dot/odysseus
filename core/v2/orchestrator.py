@@ -1595,8 +1595,53 @@ class OdysseusOrchestrator:
                 if not ready:
                     break
 
-                ready_agents = [s for s in ready if not s.tool]
+                # Passos com type="llm" (consolidate, analyse_results)
+                # NAO sao agentes — correm _generate_llm_response, nao
+                # _execute_agent_step. Bug: antes eram roteados para
+                # _execute_agent_step e falhavam com "agente nao
+                # encontrado" (fase LLM-fix).
+                ready_llm = [
+                    s for s in ready if not s.tool and s.type == "llm"
+                ]
+                ready_agents = [
+                    s for s in ready if not s.tool and s.type != "llm"
+                ]
                 ready_tools = [s for s in ready if s.tool]
+
+                for s in ready_llm:
+                    status[s.step] = "running"
+                    s.status = "running"
+                    try:
+                        context_snapshot = [
+                            {"agent": r.task_id, "summary": r.summary,
+                             "success": r.success}
+                            for r in agent_results
+                        ]
+                        prompt = (
+                            f"Consolida estes resultados sobre "
+                            f"\"{plan.query}\": "
+                            f"{json.dumps(context_snapshot, ensure_ascii=False)}"
+                        )
+                        llm_out = await self._generate_llm_response(
+                            prompt,
+                            model=model,
+                            useragent_knowledge=useragent_knowledge,
+                        )
+                        if llm_out:
+                            s.result = llm_out
+                            status[s.step] = "completed"
+                            s.status = "completed"
+                        else:
+                            status[s.step] = "failed"
+                            s.status = "failed"
+                    except Exception as e:
+                        logger.exception(
+                            "Erro no passo LLM %s do plano %s",
+                            s.step, plan.id,
+                        )
+                        status[s.step] = "failed"
+                        s.status = "failed"
+                        s.result = str(e)
 
                 if ready_agents:
                     for s in ready_agents:

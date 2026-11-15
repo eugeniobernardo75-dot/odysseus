@@ -187,6 +187,20 @@ def test_ollama_payload_leaves_plain_messages_untouched():
     assert payload["messages"][0] == {"role": "user", "content": "hello"}
 
 
+def test_ollama_payload_disables_thinking_for_supported_models():
+    messages = [{"role": "user", "content": "hello"}]
+
+    qwen_payload = llm_core._build_ollama_payload(
+        "qwen3:8b", messages, temperature=0.0, max_tokens=32
+    )
+    llama_payload = llm_core._build_ollama_payload(
+        "llama3.2:3b", messages, temperature=0.0, max_tokens=32
+    )
+
+    assert qwen_payload["think"] is False
+    assert "think" not in llama_payload
+
+
 def test_ollama_payload_tolerates_malformed_arguments():
     msgs = [{
         "role": "assistant",

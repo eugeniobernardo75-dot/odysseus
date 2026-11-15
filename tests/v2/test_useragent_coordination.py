@@ -69,6 +69,104 @@ def test_default_orchestrator_tools_do_not_expose_global_memory():
     assert "memory" not in registry.names
 
 
+def test_base_tool_registration_fills_gaps_without_replacing_custom_tools():
+    from core.v2.tool_registry import ToolRegistry
+    from core.v2.tools import FileTool, register_base_tools
+
+    registry = ToolRegistry()
+    existing_file_tool = FileTool()
+    registry.register(existing_file_tool)
+
+    registered = register_base_tools(registry, only_missing=True)
+
+    assert registry.get_tool("file") is existing_file_tool
+    assert "file" not in registered
+    assert {"web", "shell", "python", "search", "code", "git"}.issubset(
+        set(registered)
+    )
+
+
+def test_useragent_tool_scope_is_read_only_without_a_worker():
+    from core.v2.agents import AgentFactory
+    from core.v2.orchestrator import OdysseusOrchestrator
+    from core.v2.user_agent_config import (
+        USERAGENT_READ_ONLY_TOOL_ALLOWLIST,
+        UserAgent,
+        UserConfig,
+    )
+
+    orchestrator = object.__new__(OdysseusOrchestrator)
+    orchestrator.agents = AgentFactory()
+
+    assert orchestrator._worker_tool_allowlist(None) == USERAGENT_READ_ONLY_TOOL_ALLOWLIST
+    assert {"file.read", "file.list", "file.search", "file.exists"}.issubset(
+        USERAGENT_READ_ONLY_TOOL_ALLOWLIST
+    )
+    assert not {"file.write", "file.delete", "shell", "python", "git"}.intersection(
+        USERAGENT_READ_ONLY_TOOL_ALLOWLIST
+    )
+    assert orchestrator._worker_tool_allowlist("unknown-worker") == frozenset()
+    assert UserAgent(config=UserConfig()).get_capabilities_snapshot()[
+        "tool_access"
+    ]["automatic"] == sorted(USERAGENT_READ_ONLY_TOOL_ALLOWLIST)
+
+
+@pytest.mark.asyncio
+async def test_useragent_default_scope_can_read_but_cannot_write(tmp_path):
+    from core.v2.agents import AgentFactory
+    from core.v2.orchestrator import OdysseusOrchestrator
+    from core.v2.planner_agent import Plan, PlanStep
+    from core.v2.tool_manager import ToolManager
+    from core.v2.tool_registry import ToolRegistry
+    from core.v2.tools import FileTool
+
+    target = tmp_path / "source.md"
+    target.write_text("Mind OS reference", encoding="utf-8")
+    registry = ToolRegistry()
+    registry.register(FileTool())
+    manager = ToolManager(registry=registry)
+    context = {"workspace_path": str(tmp_path), "workspace_purpose": "analysis"}
+    orchestrator = object.__new__(OdysseusOrchestrator)
+    orchestrator._tool_manager = manager
+    orchestrator._tool_context = context
+    orchestrator.agents = AgentFactory()
+    plan = Plan(id="PLAN-READONLY", query="read source")
+
+    read_result = await orchestrator._execute_tool_step(
+        PlanStep(
+            step="read_source",
+            description="Read a workspace file",
+            type="tool",
+            tool="file",
+            tool_params={"action": "read", "path": "source.md"},
+        ),
+        plan,
+    )
+    write_result = await orchestrator._execute_tool_step(
+        PlanStep(
+            step="write_file",
+            description="Write a workspace file",
+            type="tool",
+            tool="file",
+            tool_params={
+                "action": "write",
+                "path": "new.md",
+                "content": "not allowed",
+            },
+        ),
+        plan,
+    )
+
+    assert read_result.success is True
+    assert read_result.details["tool_result"]["data"]["content"] == "Mind OS reference"
+    assert write_result.success is False
+    assert (
+        write_result.details["tool_result"]["metadata"]["reason"]
+        == "worker_tool_not_allowed"
+    )
+    assert not (tmp_path / "new.md").exists()
+
+
 @pytest.mark.asyncio
 async def test_ordinary_question_does_not_create_a_plan():
     orchestrator = object.__new__(OdysseusOrchestrator)
@@ -215,6 +313,132 @@ def test_useragent_reads_index_then_normative_mind_os_sources(tmp_path, monkeypa
     assert references[2]["path"] == "02_AGENTS/UserAgent/Permissions.md"
 
 
+def test_useragent_prioritizes_nested_brain_vault_index(tmp_path, monkeypatch):
+    from core.v2 import user_agent_config
+
+    brain_vault = tmp_path / "brain"
+    mind_os = tmp_path / "mind"
+    index = brain_vault / "00_SYSTEM" / "00_Index"
+    mind_system = mind_os / "00_SYSTEM"
+    index.mkdir(parents=True)
+    mind_system.mkdir(parents=True)
+    (index / "architecture.md").write_text(
+        "---\nauthority: architectural\nstatus: active\n---\n"
+        "UserAgent tool routing and architecture reference.",
+        encoding="utf-8",
+    )
+    (mind_system / "Constitution.md").write_text(
+        "---\nauthority: normative\nstatus: official\n---\n"
+        "UserAgent tool access must follow permissions.",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(user_agent_config, "BRAIN_VAULT_ROOT", brain_vault)
+    monkeypatch.setattr(user_agent_config, "MIND_OS_ROOT", mind_os)
+
+    references = UserAgent(config=UserConfig())._retrieve_relevant_knowledge(
+        "UserAgent tool access"
+    )
+
+    assert references[0]["path"] == "00_SYSTEM/00_Index/architecture.md"
+    assert references[0]["source_type"] == "Brain Vault"
+    assert references[1]["path"] == "MIND OS/00_SYSTEM/Constitution.md"
+
+
+@pytest.mark.asyncio
+async def test_useragent_reads_named_brain_file_without_llm_or_workers(
+    tmp_path, monkeypatch
+):
+    from core.v2 import safety, user_agent_config
+
+    brain_vault = tmp_path / "Obsidian Brain Vault"
+    mind_os = tmp_path / "Odysseus_Mind_OS"
+    brain_system = brain_vault / "00_SYSTEM"
+    index = brain_system / "00_Index"
+    mind_system = mind_os / "00_SYSTEM"
+    index.mkdir(parents=True)
+    mind_system.mkdir(parents=True)
+    (index / "map.md").write_text(
+        "Architecture index entry.", encoding="utf-8"
+    )
+    (brain_system / "Architecture.md").write_text(
+        "# Requested Brain architecture\n\nBRAIN_ARCHITECTURE_CONTENT",
+        encoding="utf-8",
+    )
+    (mind_system / "Architecture_Map.md").write_text(
+        "# Different Mind OS architecture\n\nMIND_OS_CONTENT",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(user_agent_config, "BRAIN_VAULT_ROOT", brain_vault)
+    monkeypatch.setattr(user_agent_config, "MIND_OS_ROOT", mind_os)
+
+    class MemoryManager:
+        def __init__(self):
+            self.values = {}
+
+        def remember(self, key, value, **_kwargs):
+            self.values[key] = value
+            return True
+
+        def recall_permanent(self, key):
+            return self.values.get(key)
+
+        def recall_profile(self):
+            return {"fact": self.values}
+
+    memory_manager = MemoryManager()
+    monkeypatch.setattr(
+        user_agent_config, "_get_memory_manager", lambda: memory_manager
+    )
+    monkeypatch.setattr(
+        safety,
+        "get_safety_manager",
+        lambda: SimpleNamespace(sanitize_input=lambda value: value),
+    )
+    monkeypatch.setattr(
+        "core.v2.agents.get_agent_factory",
+        lambda: (_ for _ in ()).throw(AssertionError("worker must not be used")),
+    )
+    monkeypatch.setattr(
+        "core.v2.llm_client.get_llm_client",
+        lambda: (_ for _ in ()).throw(AssertionError("LLM must not be used")),
+    )
+    monkeypatch.setattr(
+        "core.v2.orchestrator.get_orchestrator",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("orchestrator must not be used")
+        ),
+    )
+
+    agent = UserAgent(config=UserConfig())
+    agent._retrieve_relevant_memory = lambda _query: ""
+    result = await agent.process(
+        f'pode ler o ficheiro "Architecture" da pasta "{brain_system}"?'
+    )
+
+    assert "BRAIN_ARCHITECTURE_CONTENT" in result.message
+    assert "MIND_OS_CONTENT" not in result.message
+    assert result.metadata["resolution_route"] == "knowledge_read"
+    assert result.metadata["llm_used"] is False
+    assert result.metadata["delegated_worker"] is None
+    assert result.metadata["knowledge_sources"] == ["00_SYSTEM/Architecture.md"]
+    assert result.metadata["knowledge_learned"] is True
+    assert "BRAIN_ARCHITECTURE_CONTENT" in next(iter(memory_manager.values.values()))
+    assert "não é instrução nem autorização" in next(iter(memory_manager.values.values()))
+    assert "Architecture" in UserAgent._retrieve_relevant_memory(
+        agent, "O que aprendeste?"
+    )
+    assert agent._read_requested_knowledge('lê o ficheiro "app.py"') is None
+
+    streamed = [
+        token async for token in agent.process_stream(
+            f'pode ler o ficheiro "Architecture" da pasta "{brain_system}"?'
+        )
+    ]
+    assert streamed[-1] == "__DONE__"
+    assert "BRAIN_ARCHITECTURE_CONTENT" in streamed[0]
+    assert len(memory_manager.values) == 1
+
+
 @pytest.mark.asyncio
 async def test_useragent_memory_store_remains_pending_for_human_approval(monkeypatch):
     from core.v2 import safety, user_agent_config
@@ -236,6 +460,7 @@ async def test_useragent_memory_store_remains_pending_for_human_approval(monkeyp
         lambda: MemoryManager(),
     )
 
+    agent = UserAgent(config=UserConfig())
     agent = UserAgent(config=UserConfig())
     result = await agent.process("Guarda o meu nome é Ana")
 

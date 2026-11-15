@@ -57,6 +57,29 @@ Native installs, GPU notes, Windows/macOS instructions, HTTPS, and configuration
 - **Notes, Tasks + Calendar** — reminders, todos, scheduled agent tasks, and CalDAV sync.
 - **Extras** — gallery/image editor, themes, uploads, web search, presets, sessions, and 2FA.
 
+## Odysseus V2 (Core V2)
+
+Since RC1, the platform ships an integrated Core V2 agent brain. When you pick
+the **Odysseus V2** model in the chat picker, every request flows through the
+V2 Orchestrator (memory, agent selection, tool execution, skills, learning, and
+streaming) instead of a raw LLM call:
+
+```
+Interface Odysseus → model "Odysseus V2" → /v1/chat/completions
+    → Orchestrator V2 → memory → agents → tools → learning → streaming
+```
+
+- The bridge (`v2_server.py`, port 8001) exposes the OpenAI-compatible endpoint
+  and uses the **OrchestratorAdapter** by default; the LLM is only the inference
+  engine the Orchestrator calls when needed. If the Orchestrator is unavailable
+  it degrades to the raw LLM with a warning in the logs.
+- On startup the main app auto-registers the **Odysseus V2** model endpoint and
+  starts the bridge if it is offline. Override the bridge URL with
+  `ODYSSEUS_V2_BRIDGE_URL` (use `host.docker.internal` when the bridge runs on
+  the Docker host) or disable the autostart with `ODYSSEUS_V2_BRIDGE_AUTOSTART=0`.
+- Run the bridge standalone with `python v2_server.py` (or `run_v2.bat` on
+  Windows).
+
 ## Demo
 
 A full hover-to-play tour lives on the [Odysseus landing page](https://odysseus-dev.github.io/odysseus/). Its source lives under [`website/`](website/).

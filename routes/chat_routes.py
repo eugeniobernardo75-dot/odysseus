@@ -1428,6 +1428,33 @@ def _candidate_index(candidates, actual_candidate) -> int:
     return 0
 
 
+def _form_flag_enabled(value) -> bool:
+    return value is True or str(value or "").strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+
+
+async def v2_chat_stream_adapter(
+    message: str,
+    context: Optional[dict] = None,
+    *,
+    user_agent=None,
+) -> AsyncGenerator[dict, None]:
+    """Adapt UserAgent token streaming to the GUI stream event contract."""
+    if user_agent is None:
+        from core.v2.user_agent_config import get_user_agent
+
+        user_agent = get_user_agent()
+
+    yield {"type": "metadata", "coordinated_by": "useragent"}
+    async for token in user_agent.process_stream(message, context=context):
+        if token == "__DONE__":
+            yield {"type": "done"}
+            return
+        yield {"type": "token", "content": token}
+    yield {"type": "incomplete"}
+
+
 def _stream_set(session_id: str, **fields) -> None:
     """Update fields on the active-stream entry for `session_id`, or
     no-op if the entry has already been popped. Using .get() avoids a
@@ -2510,6 +2537,13 @@ def setup_chat_routes(
         allow_web_search = form_data.get("allow_web_search") or (body or {}).get("allow_web_search")
         use_rag = form_data.get("use_rag")
         search_context = form_data.get("search_context")  # pre-fetched web search results (compare mode)
+        requested_engine = str(
+            form_data.get("engine") or (body or {}).get("engine") or ""
+        ).strip().lower()
+        force_v2 = os.getenv("ODYSSEUS_V2_GUI_FORCE", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        use_v2 = requested_engine == "v2" or force_v2
         compare_mode = str(form_data.get("compare_mode", "")).lower() == "true"
         thinking_mode = str(form_data.get("thinking_mode") or "").strip().lower()
         thinking_mode = thinking_mode if thinking_mode in {"on", "off"} else None
@@ -3008,6 +3042,15 @@ def setup_chat_routes(
                     _workspace_agent_intent = True
                     allow_bash = "true"
                     logger.info("chat→agent auto-escalation: explicit path workspace=%s", workspace)
+
+            # Auto-detect V2: sessões no modelo odysseus-v2 usam o UserAgent como
+            # coordenador, mesmo sem o frontend enviar engine=v2.
+            if not use_v2 and getattr(sess, "model", "") == "odysseus-v2":
+                use_v2 = True
+                logger.info(
+                    "GUI V2 auto-detectado (modelo odysseus-v2) para a sessão %s",
+                    session,
+                )
         except SessionNotFoundError as e:
             raise HTTPException(404, str(e))
         except (ValueError, ValidationError):
@@ -3053,7 +3096,12 @@ def setup_chat_routes(
                 logger.warning("Failed to parse attachments JSON, ignoring attachments", exc_info=e)
 
         image_generation_session = _is_image_generation_session(sess, owner=effective_user(request))
-        no_memory = str(form_data.get("no_memory", "")).lower() == "true"
+        # V2 retrieves its own memory through UserAgent; the V1 pre-context
+        # must not read or inject a separate memory set for V2 requests.
+        no_memory = (
+            str(form_data.get("no_memory", "")).lower() == "true"
+            or use_v2
+        )
         if image_generation_session:
             no_memory = True
             use_rag = "false"
@@ -3908,6 +3956,7 @@ def setup_chat_routes(
         async def stream_with_save() -> AsyncGenerator[str, None]:
             # _effective_mode is read-only here; closure captures it from
             # the outer scope. (Was `nonlocal` but never reassigned.)
+            _chat_start = time.time()
             research_sources = None
             web_sources = ctx.web_sources
 
@@ -3915,6 +3964,283 @@ def setup_chat_routes(
             _active_streams[session] = {"status": "streaming", "partial": "", "query": message, "is_research": effective_do_research, "mode": _effective_mode}
             if not tool_approval_continuation:
                 yield f"data: {json.dumps({'type': 'turn_mode', 'mode': _effective_mode, 'auto_escalated': auto_escalated})}\n\n"
+
+            if use_v2:
+                fallback_reason = None
+                if _effective_mode != "chat":
+                    fallback_reason = "O V2 GUI suporta apenas chat simples nesta fase."
+                elif incognito:
+                    fallback_reason = "O V2 ainda não suporta sessões incognito."
+                elif compare_mode or preset_id:
+                    fallback_reason = "Comparação e presets ainda não são suportados pelo V2 GUI."
+                elif (
+                    attachments
+                    or ctx.preprocessed.attachment_meta
+                    or active_doc_id
+                    or active_email_uid
+                    or effective_do_research
+                    or _form_flag_enabled(use_web)
+                    or _form_flag_enabled(use_research)
+                    or _form_flag_enabled(use_rag)
+                    or search_context
+                    or ctx.rag_sources
+                    or ctx.web_sources
+                    or ctx.used_memories
+                    or workspace
+                    or workspace_rejected
+                    or form_data.get("approval_id")
+                    or (body or {}).get("approval_id")
+                ):
+                    fallback_reason = (
+                        "O pedido usa anexos, pesquisa, contexto externo, "
+                        "workspace ou aprovação não suportados pelo V2 GUI."
+                    )
+
+                v2_context = {}
+                if fallback_reason is None:
+                    v2_context["messages"] = [
+                        {
+                            "role": item.get("role"),
+                            "content": item.get("content"),
+                        }
+                        for item in ctx.messages
+                        if isinstance(item, dict)
+                        and item.get("role") in ("user", "assistant")
+                        and isinstance(item.get("content"), str)
+                    ]
+                    try:
+                        from core.v2.llm_client import get_llm_client
+
+                        v2_config = get_llm_client().config
+                        configured_model = (
+                            getattr(v2_config, "resolved_model", "")
+                            or getattr(v2_config, "model", "")
+                        )
+                        configured_url = (
+                            getattr(v2_config, "resolved_url", "")
+                            or getattr(v2_config, "base_url", "")
+                        )
+                        if sess.model == "odysseus-v2" and configured_model:
+                            v2_context["model"] = configured_model
+                        elif sess.model and sess.model != "odysseus-v2":
+                            if sess.model != configured_model:
+                                fallback_reason = (
+                                    "O modelo escolhido na sessão não corresponde "
+                                    "ao modelo V2 configurado."
+                                )
+                            elif sess.endpoint_url and configured_url and not _session_url_matches_endpoint(
+                                sess.endpoint_url, configured_url
+                            ):
+                                fallback_reason = (
+                                    "O endpoint escolhido na sessão não corresponde "
+                                    "ao endpoint V2 configurado."
+                                )
+                            else:
+                                v2_context["model"] = sess.model
+                    except Exception as e:
+                        logger.warning(
+                            "Não foi possível validar a configuração V2 para o GUI",
+                            exc_info=e,
+                        )
+                        fallback_reason = "A configuração do modelo V2 não está disponível."
+
+                if fallback_reason:
+                    logger.info(
+                        "GUI V2 não utilizado para a sessão %s: %s",
+                        session,
+                        fallback_reason,
+                    )
+                    yield (
+                        "data: "
+                        + json.dumps({
+                            "type": "engine_fallback",
+                            "requested": "v2",
+                            "used": "v1",
+                            "reason": fallback_reason,
+                        })
+                        + "\n\n"
+                    )
+                else:
+                    full_response = ""
+                    v2_completed = False
+                    yield f'data: {json.dumps({"type": "model_info", "model": sess.model})}\n\n'
+                    try:
+                        async for event in v2_chat_stream_adapter(
+                            message, context=v2_context
+                        ):
+                            if event["type"] == "metadata":
+                                yield (
+                                    "data: "
+                                    + json.dumps({
+                                        "type": "engine",
+                                        "data": {
+                                            "engine": "v2",
+                                            "coordinated_by": event["coordinated_by"],
+                                        },
+                                    })
+                                    + "\n\n"
+                                )
+                                continue
+                            if event["type"] == "done":
+                                v2_completed = True
+                                break
+                            if event["type"] == "incomplete":
+                                break
+                            token = event["content"]
+                            full_response += token
+                            _stream_set(session, partial=full_response)
+                            yield f"data: {json.dumps({'delta': token})}\n\n"
+                    except (asyncio.CancelledError, GeneratorExit):
+                        if full_response:
+                            sess.add_message(ChatMessage(
+                                "assistant",
+                                full_response,
+                                metadata={
+                                    "stopped": True,
+                                    "engine": "v2",
+                                    "coordinated_by": "useragent",
+                                },
+                            ))
+                            if not incognito:
+                                session_manager.save_sessions()
+                        raise
+                    except Exception as e:
+                        logger.exception("Erro no stream V2 do GUI para sessão %s", session)
+                        if full_response:
+                            yield (
+                                "data: "
+                                + json.dumps({
+                                    "type": "error",
+                                    "error": "O stream V2 falhou depois de iniciar a resposta.",
+                                })
+                                + "\n\n"
+                            )
+                            last_metrics = {
+                                "stopped": True,
+                                "engine": "v2",
+                                "coordinated_by": "useragent",
+                                "error": str(e),
+                            }
+                            _saved_id = save_assistant_response(
+                                sess,
+                                session_manager,
+                                session,
+                                full_response,
+                                last_metrics,
+                                character_name=ctx.preset.character_name,
+                            )
+                            if _saved_id:
+                                yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                            yield "data: [DONE]\n\n"
+                            _stream_set(session, status="error")
+                            return
+                        fallback_reason = "O V2 falhou antes de gerar conteúdo."
+                        yield (
+                            "data: "
+                            + json.dumps({
+                                "type": "engine_fallback",
+                                "requested": "v2",
+                                "used": "v1",
+                                "reason": fallback_reason,
+                            })
+                            + "\n\n"
+                        )
+
+                    if v2_completed and full_response:
+                        elapsed = max(time.time() - _chat_start, 0.001)
+                        last_metrics = {
+                            "response_time": round(elapsed, 2),
+                            "input_tokens": estimate_tokens(ctx.messages),
+                            "output_tokens": max(1, len(full_response) // 4),
+                            "tokens_per_second": round(
+                                max(1, len(full_response) // 4) / elapsed, 2
+                            ),
+                            "model": sess.model,
+                            "requested_model": sess.model,
+                            "usage_source": "estimated",
+                            "engine": "v2",
+                            "coordinated_by": "useragent",
+                        }
+                        yield f'data: {json.dumps({"type": "metrics", "data": last_metrics})}\n\n'
+                        _saved_id = save_assistant_response(
+                            sess,
+                            session_manager,
+                            session,
+                            full_response,
+                            last_metrics,
+                            character_name=ctx.preset.character_name,
+                        )
+                        if _saved_id:
+                            yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                        run_post_response_tasks(
+                            sess,
+                            session_manager,
+                            session,
+                            message,
+                            full_response,
+                            last_metrics,
+                            ctx.uprefs,
+                            memory_manager,
+                            memory_vector,
+                            webhook_manager,
+                            incognito=False,
+                            compare_mode=False,
+                            character_name=ctx.preset.character_name,
+                            owner=_user,
+                            allow_background_extraction=not tool_policy.block_all_tool_calls,
+                        )
+                        _stream_set(session, status="done")
+                        yield "data: [DONE]\n\n"
+                        return
+                    if v2_completed:
+                        yield (
+                            "data: "
+                            + json.dumps({
+                                "type": "engine_fallback",
+                                "requested": "v2",
+                                "used": "v1",
+                                "reason": "O V2 terminou sem produzir conteúdo.",
+                            })
+                            + "\n\n"
+                        )
+                    elif full_response:
+                        yield (
+                            "data: "
+                            + json.dumps({
+                                "type": "error",
+                                "error": "O stream V2 terminou sem marcador de conclusão.",
+                            })
+                            + "\n\n"
+                        )
+                        last_metrics = {
+                            "stopped": True,
+                            "engine": "v2",
+                            "coordinated_by": "useragent",
+                        }
+                        _saved_id = save_assistant_response(
+                            sess,
+                            session_manager,
+                            session,
+                            full_response,
+                            last_metrics,
+                            character_name=ctx.preset.character_name,
+                        )
+                        if _saved_id:
+                            yield f'data: {json.dumps({"type": "message_saved", "id": _saved_id})}\n\n'
+                        yield "data: [DONE]\n\n"
+                        _stream_set(session, status="error")
+                        return
+                    else:
+                        yield (
+                            "data: "
+                            + json.dumps({
+                                "type": "engine_fallback",
+                                "requested": "v2",
+                                "used": "v1",
+                                "reason": "O stream V2 terminou sem marcador de conclusão.",
+                            })
+                            + "\n\n"
+                        )
 
             # The client sent a workspace the server refused to bind (deleted
             # folder, file path, sensitive dir, filesystem root). Tell it up
@@ -4254,7 +4580,7 @@ def setup_chat_routes(
                 _active_streams.pop(session, None)
                 return
             elif chat_mode == "chat":
-                _chat_start = time.time()
+
                 _answered_by = None  # set if the selected model failed and a fallback answered
                 _requested_model = sess.model
                 _actual_model = None

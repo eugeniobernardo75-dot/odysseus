@@ -187,7 +187,7 @@ KNOWN_CONTEXT_WINDOWS = {
     'llama-3': 131072,
 
     # --- Qwen ---
-    'qwen3': 131072,
+    'qwen3': 40960,
     'qwen2.5': 131072,
     'qwen2': 32768,
     'qwq': 32768,
@@ -247,8 +247,10 @@ def _fetch_ollama_context_length(model: str, endpoint_url: str) -> Optional[int]
         return None
     try:
         parsed = urlparse(endpoint_url)
-        host = (parsed.hostname or "").lower()
-        if host not in {"localhost", "127.0.0.1", "0.0.0.0", "::1", "host.docker.internal"} and parsed.port != 11434:
+        # Apenas Ollama nativo tem /api/show. O bridge V2 (:8001)
+        # e endpoints OpenAI-compat nao — tentar seria 404 e
+        # poluir logs. Porta 11434 e o sinal inequivoco.
+        if parsed.port != 11434:
             return None
     except Exception:
         return None
@@ -259,9 +261,8 @@ def _fetch_ollama_context_length(model: str, endpoint_url: str) -> Optional[int]
         return cached[0]
 
     try:
-        base = endpoint_url.rstrip("/")
-        if base.endswith("/v1"):
-            base = base[:-3]
+        parsed = urlparse(endpoint_url)
+        base = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
         response = httpx.post(
             f"{base}/api/show",
             json={"model": model},
