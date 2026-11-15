@@ -47,5 +47,6 @@ def test_llm_client_static_guardrails_are_present():
     text = source.read_text(encoding="utf-8")
 
     assert "if parsed.port == 11434" in text
-    assert text.count("max(self.config.timeout, 180.0)") == 4
+    # 4 em chat_stream + 4 em chat = 8
+    assert text.count("max(self.config.timeout, 180.0)") == 8
     assert text.count('payload["think"] = False') == 2
