@@ -47,7 +47,9 @@ def isolated_runtime(worker="main"):
     name. Test-specific monkeypatches and function-scoped databases still own
     their resources; this is a fallback namespace, not a shared DB fixture.
     """
-    with tempfile.TemporaryDirectory(prefix=f"ody-{worker}-") as directory:
+    with tempfile.TemporaryDirectory(
+        prefix=f"ody-{worker}-", ignore_cleanup_errors=True
+    ) as directory:
         root = Path(directory)
         with pytest.MonkeyPatch.context() as patcher:
             paths = {

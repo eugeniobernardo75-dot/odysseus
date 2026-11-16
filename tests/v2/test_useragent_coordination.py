@@ -41,6 +41,7 @@ def test_first_phase_registry_exposes_approved_specialists_and_workers():
     assert {agent["name"] for agent in factory.list_agents()} == {
         "research", "code", "business",
         "secretaria", "tecnico", "director-geral",
+        "legal", "finance", "documentation", "science",
     }
 
 

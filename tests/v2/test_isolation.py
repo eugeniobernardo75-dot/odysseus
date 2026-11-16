@@ -688,6 +688,7 @@ class TestIsolationBoundary:
         assert volumes[0].startswith(str(workspace))
         assert argv[argv.index("--network") + 1] == "none"
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="Isolamento real via Docker não é suportado nativamente no Windows")
     @pytest.mark.asyncio
     @requires_backend
     async def test_protected_paths_unreachable_inside_backend(self, workspace):

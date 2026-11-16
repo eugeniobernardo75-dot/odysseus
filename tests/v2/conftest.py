@@ -16,7 +16,17 @@ Nao apaga ficheiros reais em data/. Apenas redirecciona
 ODYSSEUS_V2_APPROVALS_PATH para tmp_path.
 """
 
+import os
 import pytest
+
+# ESTE FIXTURE TEM DE VIR PRIMEIRO
+@pytest.fixture(autouse=True)
+def clean_odysseus_env(monkeypatch):
+    """Limpa TODAS as variáveis ODYSSEUS_V2_ para evitar vazamento entre testes.
+    Exceto a APPROVALS_PATH, que é gerida pelo fixture abaixo."""
+    for key in list(os.environ.keys()):
+        if key.startswith("ODYSSEUS_V2_") and key != "ODYSSEUS_V2_APPROVALS_PATH":
+            monkeypatch.delenv(key, raising=False)
 
 
 @pytest.fixture(autouse=True)
@@ -41,3 +51,4 @@ def _isolate_safety_state(tmp_path, monkeypatch):
     orch_mod.reset_orchestrator()
     tm_mod.reset_tool_manager()
     safety_mod.reset_safety_manager()
+    
